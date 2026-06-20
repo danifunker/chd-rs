@@ -12,27 +12,30 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done & verified · `[!]` blocke
 
 ## Current focus
 
-**`chdman createraw` parity is COMPLETE & byte-identical to chdman 0.288** — uncompressed +
-compressed (now **multi-codec**: zlib/huff/lzma/zstd + **flac**), **self-hunk dedup**, header,
-`compress_v5_map`, and SHA-1, all verified end-to-end. All five bit-exact codec encoders are wired
-(flac via `libflac-rs`, round-trip-verified through chdman; byte-identity is libm-gated — see below).
+**The chd-rs write-support / libchdman parity initiative is COMPLETE — all phases A–G done, output
+byte-for-byte identical to chdman 0.288.** Pure-Rust create/extract for raw/hd/cd(+GD-ROM)/dvd, copy,
+metadata add/delete, parent/diff (compressed child + the `HdImage` runtime block device), plus
+read-side `info`/`verify`, all verified against the chdman oracle. The `rchdman` CLI is a
+chdman-style front-end over the whole surface, and the write docs (README + `chdman-mapping.md`) are
+in place.
 
-**Now:** **Phases A, B, C, D are done, and Phase E `createcd` is byte-identical.** A: `codec`
-module, `flac` encoder, multi-codec `write_raw`, `CompressionProgress` + `progress`/`cancel`, public
-`hd` createraw + extract + geometry. B: full **`createhd`** (metadata writer + overall SHA-1 +
-GDDD/IDNT). C: **`copy`** + **`write_metadata`/`delete_metadata`** on existing CHDs. D: **`dvd`**
-(`createdvd`/`extractdvd`). E (in progress): CD codec encoders (cdzl/cdlz/cdzs) **and the
-**`createcd`** container** — `cd` module with a pure-Rust CUE/ISO TOC parser, CHT2 metadata, and
-`create_from_cue`/`create_from_iso`, all **byte-identical to `chdman createcd`**. Remaining E:
-`extractcd`, GDI/Nero, `list_tracks`, `CdCookedReader`, `cdfl`. Then F (parent/diff + `HdImage`),
-G (`info`/`verify`, rchdman).
+**Done (A–G):** A `codec`/`flac`/multi-codec `write_raw`/`progress`-cancel/public `hd`. B `createhd`
+(metadata writer + overall SHA-1 + GDDD/IDNT). C `copy` + `write_metadata`/`delete_metadata`. D
+`dvd`. E `cd` — createcd (CUE/ISO/GDI) + extractcd (cue/bin/gdi) + `extract_to_iso`/`CdCookedReader`
++ `list_tracks`, all four codecs incl. glibc-verified `cdfl`. F parent/diff
+(`create_raw_from_path_with_parent`, byte-identical to `createraw -op`) + `HdImage`. G `Chd::verify`
+(+ `verify` feature) + rchdman CLI + docs.
 
-**Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target). See
-"Verification gates" below. **65 write/compat/unit tests green** (+2 `#[ignore]`d glibc-chdman FLAC
-dump checks; the 5 failing `read_*` tests are pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`) and **verified green on GitHub Actions** (all 4 jobs:
-lint + test on ubuntu/windows/macos): clones the sibling codec crates at their tags (they're public),
-then `cargo build -p chd` + `cargo test -p chd --features write-zstd -- --skip tests::read` + fmt.
-**`Chd::info()` + `ChdInfo`** (read-side) also landed (Phase G partial).
+**Deferred (documented, not blocking):** Nero (`.nrg`) input (binary TOC, unverifiable — chdman
+can't write `.nrg` so no fixture); `copy` re-doing legacy CD metadata (CHCD/CHTR/CHGT→CHT2) for
+legacy-source copies; the crates.io version-dep switch (CI currently clones the sibling crates).
+
+**Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target) + a **glibc-built
+chdman 0.288** (built this session in WSL at `~/repos/mame`) for FLAC byte-identity. See
+"Verification gates" below. **67 write/compat/unit tests green** (+2 `#[ignore]`d glibc-chdman FLAC
+dump checks; the 5 failing `read_*` tests are pre-existing missing-fixture cases, unrelated to write). **CI** (`.github/workflows/ci.yml`) **green on GitHub Actions** (lint + test on ubuntu/windows/macos):
+clones the sibling codec crates at their tags, then `cargo build -p chd` +
+`cargo test -p chd --features write-zstd -- --skip tests::read` + fmt.
 
 **CI:** chd-rs has **no CI** (siblings do). Blocked: the `write` feature's optional **path deps** on
 the sibling crates (`../../lzma-sdk-rs`, …) make even the default build's dependency resolution fail
@@ -224,10 +227,17 @@ decision (may become a new crate).
       `write::write_empty_diff` builds the initial diff. Round-trip verified **and chdman
       `extracthd -ip` reads our diff** (chdman-compatible format).
 
-## M8 — rchdman + docs
+## M8 — rchdman + docs ✅
 
-- [ ] rchdman: `createhd`/`createcd`/`createdvd`/`copy`/`addmeta`/`delmeta`
-- [ ] Port `docs/format-modules.md` + `docs/chdman-mapping.md`; README rewrite
+- [x] **`Chd::verify()`** ✅ — `verify` feature (pulls only `sha1`; `write` enables it). Recomputes
+      raw (over logical bytes) + overall (metadata-inclusive) SHA-1, compares to header →
+      `VerifyResult`. Tested (data + metadata corruption + partial-hunk + uncompressed).
+- [x] **rchdman** ✅ — `createraw`(+`--outputparent`)/`createhd`/`createcd`/`createdvd`/`copy`/
+      `addmeta`/`delmeta`/`extractcd`/`extractdvd` + full `verify` (via `Chd::verify`). Smoke-tested
+      end-to-end (create → verify → extract round-trips).
+- [x] **Docs** ✅ — README "Writing CHDs" section + `docs/chdman-mapping.md` (every chdman command →
+      chd-rs API + rchdman). (`format-modules.md` is libchdman-internal; covered by chdman-mapping +
+      libchdman-parity.)
 
 ---
 
@@ -280,10 +290,28 @@ Tracked in detail in [docs/libchdman-parity.md](docs/libchdman-parity.md). Phase
   all four codecs incl. glibc-verified `cdfl`. Only Nero (`.nrg`) deferred (unverifiable).
 - [x] **F** — parent/diff + `HdImage` ✅ — `create_raw_from_path_with_parent` (compressed child,
   byte-identical to `createraw -op`) + `HdImage` (uncompressed diff + sector R/W; chdman reads it).
-- [~] **G** — `Chd::info` ✅ + `ChdInfo`; `verify` (needs a read-side SHA-1 dep) + rchdman + docs.
+- [x] **G** — `Chd::info`/`ChdInfo` ✅ + **`Chd::verify`** ✅ (`verify` feature) + **rchdman**
+  (create/extract/copy/meta/verify) ✅ + **docs** (README + chdman-mapping) ✅.
+
+**All phases A–G complete.** The pure-Rust write surface matches `chdman` 0.288 byte-for-byte across
+createraw/hd/cd(+GD)/dvd, all extracts, copy, metadata add/del, parent/diff, and the `HdImage`
+runtime device, plus read-side `info`/`verify`. Deferred (documented): Nero `.nrg` input
+(unverifiable without a fixture); legacy-CD-metadata re-do in `copy`; the crates.io version-dep
+switch for CI.
 
 ## Session log
 
+- 2026-06-20: **Phase G COMPLETE — `verify` + rchdman + docs (initiative done).** (1) **`Chd::verify()`**
+  behind a new `verify` feature (pulls only `sha1`; `write` enables it transitively, so the default
+  read build still adds nothing). Recomputes the raw SHA-1 over the **logical** (unpadded) bytes — the
+  rchdman loop was hashing padded hunks, wrong for partial last hunks — and the overall
+  metadata-inclusive SHA-1, returning `VerifyResult{computed/expected raw+overall}` with
+  `is_valid()`/`raw_sha1_valid()`/`overall_sha1_valid()`. Tested: data + metadata corruption detected
+  independently, partial-last-hunk verifies, uncompressed refused. (2) **rchdman** grew from read-only
+  to a chdman-style CLI: createraw(+`--outputparent`)/createhd/createcd(CUE/GDI/ISO)/createdvd/copy/
+  addmeta/delmeta/extractcd/extractdvd + full verify; smoke-tested (create→verify→extract round-trips).
+  (3) **Docs**: README "Writing CHDs" + `docs/chdman-mapping.md`. **67 lib/compat tests green.**
+  **All phases A–G done.**
 - 2026-06-20: **Phase F COMPLETE — parent/diff + `HdImage`.** (1) **`HdImage`** (`hd.rs`): a
   read/write block-device view over an uncompressed HD CHD. `open` (in-place), `open_with_diff`/
   `reopen_diff` (uncompressed **diff** over a compressed parent — unwritten hunks fall through to the

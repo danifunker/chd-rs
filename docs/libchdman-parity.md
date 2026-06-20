@@ -37,10 +37,11 @@ and [docs/chdman-mapping.md](../../libchdman-rs/docs/chdman-mapping.md).
 `CdCookedReader`; all byte-identical to `chdman` (all four codecs; `cdfl` glibc-gated).
 
 **Done (cont.):** **Phase F** — parent/diff (`hd::create_raw_from_path_with_parent`, byte-identical
-to `createraw -op`) + the `HdImage` runtime block device (uncompressed in-place / diff over a parent).
+to `createraw -op`) + the `HdImage` runtime block device. **Phase G** — `Chd::verify()`, the
+chdman-style `rchdman` CLI, and the write docs (README + chdman-mapping).
 
-**Left:** Nero (`.nrg`) input (deferred — unverifiable); `verify`; rchdman CLI; remaining docs.
-Everything below.
+**All phases A–G are complete.** Deferred (documented): Nero (`.nrg`) input (unverifiable without a
+fixture chdman can't produce) and `copy` re-doing legacy CD metadata for legacy-source copies.
 
 ---
 
@@ -94,7 +95,7 @@ wrapper) · ⬜ to build.
 | `write_metadata/delete_metadata` | `metadata::write_metadata`/`delete_metadata` | ✅ | done & byte-identical (free fns over `Read+Write+Seek`, not methods on `Chd`). chdman edits only uncompressed CHDs; chd-rs also handles compressed. |
 | `clone_all_metadata(src)` | `copy` module (clones all metadata) | ✅ | done inside `copy::copy`. |
 | `info() -> ChdInfo` | `ChdInfo` + `Chd::info()` | ✅ | done; header + metadata tags + track count + `is_hd/cd/gd/dvd/av` (read-side). |
-| `verify()` | new `Chd::verify()` | ⬜ | deferred — needs a SHA-1 dep in the read-only build. |
+| `verify()` | `Chd::verify() -> VerifyResult` | ✅ | done; `verify` feature (pulls only `sha1`; `write` enables it). Recomputes raw + overall SHA-1, compares to header. |
 | `make_tag(a,b,c,d)` | `make_tag(&[u8;4])` (private) | 🟡 | expose (note signature difference) or add a 4-arg form. |
 | `CompressionProgress` | `crate::CompressionProgress` | ✅ | `{bytes_done,bytes_total,ratio}` matched exactly (crate root, `write` feature). |
 | `ChdInfo` | `crate::ChdInfo` | ✅ | done (crate root). |
@@ -197,9 +198,9 @@ Ordered by dependency; maps onto PARITY_PLAN M3–M8.
   hash map, **byte-identical to `chdman createraw -op`**) + the `HdImage` runtime block device
   (uncompressed in-place or a diff over a compressed parent; `read_sector`/`write_sector`; verified
   round-trip and chdman-readable).
-- **Phase G — `Chd::info`/`verify`, `ChdInfo`, rchdman, docs.** Lift verify from rchdman; add
-  `ChdInfo`; extend rchdman with `create*`/`copy`/`addmeta`/`delmeta`; port libchdman-rs's
-  `format-modules.md` + `chdman-mapping.md`; README rewrite.
+- **Phase G — `Chd::info`/`verify`, rchdman, docs. ✅ DONE.** `Chd::info`/`ChdInfo` +
+  `Chd::verify()`/`VerifyResult` (the `verify` feature); rchdman extended to a chdman-style CLI
+  (create/extract/copy/addmeta/delmeta/verify); README "Writing CHDs" + `docs/chdman-mapping.md`.
 
 ---
 
