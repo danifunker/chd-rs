@@ -12,11 +12,12 @@
 //! metadata, then reuse the shared V5 writer ([`write::write_create`](crate::write)). Output is
 //! **byte-identical to `chdman createcd`** (verified for `-c cdzl`/`cdlz`).
 //!
-//! [`extract_to_cue`] reverses this (chdman `extractcd`), and [`list_tracks`] reads the track
-//! table back. Both are byte-identical to chdman.
+//! [`extract_to_cue`] reverses this (chdman `extractcd`, byte-identical), [`list_tracks`] reads the
+//! track table back, and [`extract_to_iso`] / [`CdCookedReader`] expose a single MODE1 track's
+//! cooked 2048-byte user data.
 //!
 //! Matches libchdman-rs's `cd` module. All four CD codecs (`cdlz`/`cdzl`/`cdzs`/`cdfl`) encode.
-//! GDI/Nero parsing, `.gdi`/split-bin extraction, and `CdCookedReader` are not yet implemented.
+//! GDI/Nero TOC parsing and `.gdi`/split-bin extraction are not yet implemented.
 
 use crate::error::{Error, Result};
 use crate::metadata::Metadata;
@@ -26,8 +27,11 @@ use crate::{
 };
 use std::convert::TryInto;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+/// Cooked MODE1/MODE2-Form1 user-data size (`2048`).
+const COOKED_SECTOR: usize = 2048;
 
 /// Bytes of sector data in a CD frame (`2352`).
 pub const CD_MAX_SECTOR_DATA: u32 = crate::cdrom::CD_MAX_SECTOR_DATA;
@@ -851,6 +855,174 @@ pub fn extract_to_cue(
     if res.is_err() {
         let _ = std::fs::remove_file(bin_path);
         let _ = std::fs::remove_file(cue_path);
+    }
+    res
+}
+
+/// The cooked-user-data byte offset within a decoded 2448-byte frame for a MODE1 track: `0` for a
+/// cooked `MODE1` (2048) track, `16` for a raw `MODE1_RAW` (skip the 12-byte sync + 4-byte header).
+/// Other track types have no 2048-byte cooked representation here.
+fn cooked_offset(trktype: TrackType) -> Option<usize> {
+    match trktype {
+        TrackType::Mode1 => Some(0),
+        TrackType::Mode1Raw => Some(16),
+        _ => None,
+    }
+}
+
+/// A `Read + Seek` stream over a MODE1 track's **cooked 2048-byte sectors**, so an ISO9660/UDF
+/// parser can consume a CD CHD directly without extracting to a `.iso` first. The sync header,
+/// address, and ECC/EDC of raw (`MODE1_RAW`) sectors are stripped on the fly, so the stream length
+/// is always `frames * 2048` regardless of how the track was stored.
+///
+/// Matches libchdman-rs's `CdCookedReader`, but wraps chd-rs's owned [`Chd`] (via [`ChdReader`])
+/// and currently supports only `MODE1`/`MODE1_RAW` tracks (other types →
+/// [`Error::UnsupportedFormat`]).
+pub struct CdCookedReader<F: Read + Seek> {
+    reader: ChdReader<F>,
+    chd_frame_start: u64,
+    total_frames: u32,
+    cooked_offset: usize,
+    pos: u64,
+    cache_frame: Option<u32>,
+    cache: [u8; COOKED_SECTOR],
+}
+
+impl<F: Read + Seek> CdCookedReader<F> {
+    /// Open a **single-track** CD CHD as a cooked sector stream. Errors with
+    /// [`Error::UnsupportedFormat`] if there is more than one track (use [`open_track`] for those)
+    /// or the track is not MODE1.
+    ///
+    /// [`open_track`]: CdCookedReader::open_track
+    pub fn open(mut chd: Chd<F>) -> Result<Self> {
+        if read_track_metas(&mut chd)?.len() != 1 {
+            return Err(Error::UnsupportedFormat);
+        }
+        Self::open_track(chd, 0)
+    }
+
+    /// Open a specific (0-based) track of a CD CHD as a cooked sector stream. Position 0 is the
+    /// start of that track's user data. The track must be `MODE1`/`MODE1_RAW`.
+    pub fn open_track(mut chd: Chd<F>, track_index: usize) -> Result<Self> {
+        let metas = read_track_metas(&mut chd)?;
+        if track_index >= metas.len() {
+            return Err(Error::InvalidParameter);
+        }
+        let cooked_offset =
+            cooked_offset(metas[track_index].trktype).ok_or(Error::UnsupportedFormat)?;
+        let total_frames = metas[track_index].frames;
+        // logical-image frame where this track's data starts (cumulative frames + 4-frame padding)
+        let chd_frame_start: u64 = metas[..track_index]
+            .iter()
+            .map(|m| (m.frames + m.extraframes) as u64)
+            .sum();
+        Ok(CdCookedReader {
+            reader: ChdReader::new(chd),
+            chd_frame_start,
+            total_frames,
+            cooked_offset,
+            pos: 0,
+            cache_frame: None,
+            cache: [0u8; COOKED_SECTOR],
+        })
+    }
+
+    /// Total length of the cooked stream in bytes (`frames * 2048`).
+    pub fn len(&self) -> u64 {
+        self.total_frames as u64 * COOKED_SECTOR as u64
+    }
+
+    /// Whether the track has no sectors.
+    pub fn is_empty(&self) -> bool {
+        self.total_frames == 0
+    }
+
+    fn load_frame(&mut self, frame: u32) -> io::Result<()> {
+        if self.cache_frame == Some(frame) {
+            return Ok(());
+        }
+        let off = (self.chd_frame_start + frame as u64) * CD_FRAME_SIZE as u64;
+        self.reader.seek(SeekFrom::Start(off))?;
+        let mut full = [0u8; CD_FRAME_SIZE as usize];
+        self.reader.read_exact(&mut full)?;
+        self.cache
+            .copy_from_slice(&full[self.cooked_offset..self.cooked_offset + COOKED_SECTOR]);
+        self.cache_frame = Some(frame);
+        Ok(())
+    }
+}
+
+impl<F: Read + Seek> Read for CdCookedReader<F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let total = self.len();
+        if self.pos >= total || buf.is_empty() {
+            return Ok(0);
+        }
+        let want = (buf.len() as u64).min(total - self.pos) as usize;
+        let frame = (self.pos / COOKED_SECTOR as u64) as u32;
+        let off = (self.pos % COOKED_SECTOR as u64) as usize;
+        let n = want.min(COOKED_SECTOR - off);
+        self.load_frame(frame)?;
+        buf[..n].copy_from_slice(&self.cache[off..off + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl<F: Read + Seek> Seek for CdCookedReader<F> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let total = self.len() as i128;
+        let new_pos: i128 = match pos {
+            SeekFrom::Start(v) => v as i128,
+            SeekFrom::End(v) => total + v as i128,
+            SeekFrom::Current(v) => self.pos as i128 + v as i128,
+        };
+        if new_pos < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek before start of cooked stream",
+            ));
+        }
+        self.pos = new_pos as u64;
+        Ok(self.pos)
+    }
+}
+
+/// Extract a **single-track** MODE1 CD CHD to a raw `.iso` (2048 cooked bytes per sector), matching
+/// libchdman-rs's `extract_to_iso`. Rejects multi-track or non-MODE1 CHDs with
+/// [`Error::UnsupportedFormat`]. `progress` is called with the running byte count. On error the
+/// partial `iso_path` is removed.
+///
+/// (chdman has no direct CD→iso command — `extractcd` emits cue/bin or gdi — so this is a chd-rs /
+/// libchdman convenience verified by round-trip, not byte-identity.)
+pub fn extract_to_iso(
+    chd_path: &Path,
+    iso_path: &Path,
+    progress: &mut dyn FnMut(u64),
+) -> Result<()> {
+    let f = BufReader::new(File::open(chd_path).map_err(Error::from)?);
+    let chd = Chd::open(f, None)?;
+    let mut reader = CdCookedReader::open(chd)?;
+
+    let res = (|| -> Result<()> {
+        let mut out = BufWriter::new(File::create(iso_path).map_err(Error::from)?);
+        let mut buf = vec![0u8; COOKED_SECTOR * 16];
+        let mut written = 0u64;
+        loop {
+            let n = reader.read(&mut buf).map_err(Error::from)?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n]).map_err(Error::from)?;
+            written += n as u64;
+            progress(written);
+        }
+        out.flush().map_err(Error::from)?;
+        Ok(())
+    })();
+
+    if res.is_err() {
+        let _ = std::fs::remove_file(iso_path);
     }
     res
 }

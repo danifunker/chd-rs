@@ -1927,3 +1927,107 @@ fn list_tracks_reads_cht2() {
 
     let _ = std::fs::remove_dir_all(&srcdir);
 }
+
+/// `extract_to_iso` + `CdCookedReader` on a cooked MODE1/2048 CD: the round-trip iso →
+/// `create_from_iso` → `extract_to_iso` reproduces the input exactly, and `CdCookedReader` streams
+/// the same bytes (incl. a mid-stream seek).
+#[test]
+fn cooked_iso_roundtrip_mode1_2048() {
+    use crate::cd::{self, CdCookedReader, CdCreateOptions};
+    use std::io::{Read, Seek, SeekFrom};
+
+    let dir = std::env::temp_dir();
+    let iso_in = dir.join("chdrs_cooked_2048.iso");
+    let chd = dir.join("chdrs_cooked_2048.chd");
+    let iso_out = dir.join("chdrs_cooked_2048_out.iso");
+
+    let data = make_input(2048 * 100); // 100 cooked MODE1/2048 sectors
+    File::create(&iso_in).unwrap().write_all(&data).unwrap();
+    cd::create_from_iso(
+        &iso_in,
+        &chd,
+        CdCreateOptions {
+            codecs: [crate::CHD_CODEC_CD_ZLIB, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+
+    cd::extract_to_iso(&chd, &iso_out, &mut |_| {}).unwrap();
+    assert_eq!(
+        std::fs::read(&iso_out).unwrap(),
+        data,
+        "extract_to_iso (MODE1/2048) round-trip mismatch"
+    );
+
+    // CdCookedReader streams the same bytes, and a seek lands on the right sector.
+    let opened = Chd::open(BufReader::new(File::open(&chd).unwrap()), None).unwrap();
+    let mut r = CdCookedReader::open(opened).unwrap();
+    assert_eq!(r.len(), data.len() as u64);
+    let mut got = Vec::new();
+    r.read_to_end(&mut got).unwrap();
+    assert_eq!(got, data, "CdCookedReader full read mismatch");
+    r.seek(SeekFrom::Start(2048 * 5)).unwrap();
+    let mut sector5 = vec![0u8; 2048];
+    r.read_exact(&mut sector5).unwrap();
+    assert_eq!(
+        sector5,
+        data[2048 * 5..2048 * 6],
+        "CdCookedReader seek mismatch"
+    );
+
+    for p in [&iso_in, &chd, &iso_out] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// `extract_to_iso` on a raw MODE1/2352 CD yields the 2048-byte cooked user data (sync header +
+/// ECC/EDC stripped): sector `s`'s output equals `src[s*2352 + 16 ..][..2048]`.
+#[test]
+fn cooked_iso_strips_mode1_raw() {
+    use crate::cd::{self, CdCreateOptions};
+
+    let dir = std::env::temp_dir();
+    let bin = dir.join("chdrs_cooked_raw.bin");
+    let cue = dir.join("chdrs_cooked_raw.cue");
+    let chd = dir.join("chdrs_cooked_raw.chd");
+    let iso_out = dir.join("chdrs_cooked_raw_out.iso");
+
+    let nsectors = 40usize;
+    let src = build_mode1_bin(nsectors);
+    File::create(&bin).unwrap().write_all(&src).unwrap();
+    let bin_name = bin.file_name().unwrap().to_str().unwrap();
+    std::fs::write(
+        &cue,
+        format!("FILE \"{bin_name}\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n"),
+    )
+    .unwrap();
+    cd::create_from_cue(
+        &cue,
+        &chd,
+        CdCreateOptions {
+            codecs: [crate::CHD_CODEC_CD_ZLIB, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+
+    cd::extract_to_iso(&chd, &iso_out, &mut |_| {}).unwrap();
+    let out = std::fs::read(&iso_out).unwrap();
+    assert_eq!(out.len(), nsectors * 2048);
+    for s in 0..nsectors {
+        assert_eq!(
+            &out[s * 2048..(s + 1) * 2048],
+            &src[s * 2352 + 16..s * 2352 + 16 + 2048],
+            "cooked user data mismatch at sector {s}"
+        );
+    }
+
+    for p in [&bin, &cue, &chd, &iso_out] {
+        let _ = std::fs::remove_file(p);
+    }
+}
