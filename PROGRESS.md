@@ -170,9 +170,12 @@ decision (may become a new crate).
 
 ## M6 — `cd` module
 
+- [x] **CD wrapper encoders** `CdEncoder<E,S>` ✅ — encode mirror of `CdCodec` (de-swizzle 2352+96,
+      ECC strip for verifiable data sectors via `ecc.rs`, `[ecc_flags‖complen‖sector‖subcode]`
+      header). `CdZlibEncoder`/`CdLzmaEncoder`/`CdZstdEncoder`; wired into `init_encoder`.
+      **`cdzl`/`cdlz` byte-identical to chdman** (per-hunk, MODE1 ECC-strip path) + round-trip.
+      `CdFlacEncoder` (cdfl) still TODO (libm-gated; FLAC base + zlib subcode, no ECC strip).
 - [ ] CUE/GDI/ISO/Nero TOC parser (pure Rust)
-- [ ] CD wrapper encoders `CdEncoder<E,S>` + `CdFlacEncoder` (split 2048+96, ECC strip via
-      `ecc.rs`, header) — ref `cdrom.rs` decode + `ecc.rs` `generate_ecc`
 - [ ] CHT2 metadata; `TrackInfo`/`TrackType`/`SubcodeType`; `list_tracks`
 - [ ] `create_from_cue`/`create_from_iso`; `extract_to_cue`/`extract_to_iso`/`extract_to_gdi`
 - [ ] Tests: BIN/CUE round-trip, codec matrix, multi-track, GDI
@@ -233,11 +236,22 @@ Tracked in detail in [docs/libchdman-parity.md](docs/libchdman-parity.md). Phase
   writing GDDD (+ optional IDNT), byte-identical to chdman.
 - [x] **C** — `copy` ✅ + `write_metadata`/`delete_metadata` on existing CHDs ✅ — all byte-identical.
 - [x] **D** — `dvd` ✅ — `createdvd`/`extractdvd` byte-identical (`DVD ` record, 2048 sectors).
-- [ ] **E** — `cd` · [ ] **F** — parent/diff + `HdImage` · [~] **G** — `Chd::info` ✅ + `ChdInfo`;
-  `verify` (needs a read-side SHA-1 dep) + rchdman + remaining docs pending.
+- [~] **E** — `cd`: **CD codec encoders (cdzl/cdlz) byte-identical** ✅; remaining = TOC parser +
+  CHT2 metadata + createcd/extractcd container + cdfl. · [ ] **F** — parent/diff + `HdImage` ·
+  [~] **G** — `Chd::info` ✅ + `ChdInfo`; `verify` (needs a read-side SHA-1 dep) + rchdman + docs.
 
 ## Session log
 
+- 2026-06-20: **Phase E started — CD codec encoders, byte-identical to chdman.** Added
+  `CdEncoder<Engine, SubEngine>` (`compression/cdrom.rs`), the encode mirror of `CdCodec`: port of
+  MAME `chd_cd_compressor::compress` — de-swizzle `[sector(2352)‖subcode(96)]` frames, strip the
+  sync header + P/Q ECC of verifiable data sectors (recording an ECC-flag bitmap, regenerated on
+  decode), compress the sector run + subcode run, emit `[ecc_flags‖complen‖sector‖subcode]`.
+  `CdZlibEncoder`/`CdLzmaEncoder`/`CdZstdEncoder` wired into `init_encoder`. Made `compression::ecc`
+  `pub(crate)` for test sector synthesis. Verified: round-trip (mixed MODE1+audio) and **per-hunk
+  byte-identical to `chdman createcd -c cdzl`/`cdlz`** (MODE1/2352 CUE+BIN through the ECC-strip
+  path). Remaining for cd: TOC parser, CHT2 metadata, the createcd/extractcd container, cdfl. 47
+  write/compat tests green.
 - 2026-06-20: **Phase C completed (metadata write/delete) + CI added.** (1) `metadata::write_metadata`
   /`delete_metadata` for existing V5 CHDs (`Read+Write+Seek` free fns): ports of
   `metadata_find`/`metadata_set_previous_next`/`metadata_update_hash` — overwrite-in-place-or-append

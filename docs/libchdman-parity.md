@@ -175,9 +175,9 @@ Ordered by dependency; maps onto PARITY_PLAN M3–M8.
   additionally handle compressed CHDs correctly.
 - **Phase D — `dvd` module. ✅ DONE.** Flat 2048 sectors + the empty `DVD ` record (1-NUL payload),
   reusing the createhd metadata writer. `createdvd` verified byte-identical (`-c none/zlib/lzma`).
-- **Phase E — `cd` module.** Pure-Rust TOC parser, CD encoders (sector/subcode split + ECC via
-  `ecc.rs`, subcode via `zlib`), CHT2 metadata, `list_tracks`, `extract_to_{cue,iso,gdi}`,
-  `CdCookedReader`. Verify `createcd`/`extractcd`.
+- **Phase E — `cd` module.** CD wrapper **encoders** ✅ DONE (`CdEncoder<E,S>`, cdzl/cdlz byte-
+  identical; cdfl pending). Remaining: pure-Rust TOC parser, CHT2 metadata, the createcd/extractcd
+  container, `list_tracks`, `extract_to_{cue,iso,gdi}`, `CdCookedReader`. Verify `createcd`/`extractcd`.
 - **Phase F — parent/diff + `HdImage`.** Uncompressed diff children vs a compressed parent
   (parent-hunk dedup lights up here — the driver hook exists), runtime `read_sector`/`write_sector`,
   `write_hunk`/`write_bytes` equivalents.
