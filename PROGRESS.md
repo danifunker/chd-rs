@@ -26,8 +26,9 @@ ECC, CHT2); then F (parent/diff + `HdImage`), G (`info`/`verify`, rchdman).
 
 **Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target). See
 "Verification gates" below. **43 write/compat tests green** (the 5 failing `read_*` tests are
-pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`):
-clones the sibling codec crates at their tags, then builds/tests on ubuntu/windows/macos + fmt.
+pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`) and **verified green on GitHub Actions** (all 4 jobs:
+lint + test on ubuntu/windows/macos): clones the sibling codec crates at their tags (they're public),
+then `cargo build -p chd` + `cargo test -p chd --features write-zstd -- --skip tests::read` + fmt.
 **`Chd::info()` + `ChdInfo`** (read-side) also landed (Phase G partial).
 
 **CI:** chd-rs has **no CI** (siblings do). Blocked: the `write` feature's optional **path deps** on
