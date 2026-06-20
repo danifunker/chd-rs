@@ -427,3 +427,152 @@ impl CodecImplementation for CdFlacCodec {
         Ok(frame_res + sub_res)
     }
 }
+
+/// Port of MAME `chd_cd_flac_compressor::blocksize` (`chdcodec.cpp:1686`): the FLAC block size in
+/// samples = `bytes / 4`, halved while `> 2352` (`MAX_SECTOR_DATA`). Note the threshold is the CD
+/// sector size, not the `2048` of the raw-FLAC [`flac_blocksize`].
+#[cfg(feature = "write")]
+fn cd_flac_blocksize(bytes: u32) -> u32 {
+    let mut bs = bytes / 4;
+    while bs > CD_MAX_SECTOR_DATA {
+        bs /= 2;
+    }
+    bs
+}
+
+/// CD-ROM wrapper **FLAC** compression codec (cdfl) — the encode mirror of [`CdFlacCodec`].
+///
+/// Reproduces MAME's `chd_cd_flac_compressor::compress` (`chdcodec.cpp:1634`), which is **unlike**
+/// the [`CdEncoder`](crate::compression::cdrom::CdEncoder)-based `cdzl`/`cdlz`/`cdzs`: there is **no
+/// ECC strip** and **no header**. It de-swizzles the hunk's interleaved `[sector(2352) ‖
+/// subcode(96)]` frames into a sector run followed by a subcode run, FLAC-encodes the sector run as
+/// 2-channel 16-bit PCM interpreted **big-endian** (matching MAME's host-swap on a little-endian
+/// build; the decoder always reads big-endian), raw-deflates the subcode run with the same
+/// [`ZlibEncoder`](crate::compression::zlib::ZlibEncoder) the other CD codecs use, and emits
+/// `[flac_stream ‖ deflate_stream]` (the FLAC stream is self-delimiting, so no length field is
+/// stored). Returns [`Error::CompressionError`] if the result is not smaller than the hunk (MAME's
+/// `complen >= srclen`), so the writer falls back to storing the hunk uncompressed.
+///
+/// ⚠️ **Byte-identity is libm-gated** (see [`RawFlacEncoder`]): validated byte-identical to a
+/// **glibc** chdman 0.288, round-trip-correct against any build.
+#[cfg(feature = "write")]
+pub struct CdFlacEncoder {
+    frames: u32,
+    block_size: u32,
+    sub_engine: super::zlib::ZlibEncoder,
+    buffer: Vec<u8>,
+}
+
+#[cfg(feature = "write")]
+impl crate::compression::CodecEncodeImplementation for CdFlacEncoder {
+    fn new(hunk_size: u32) -> Result<Self> {
+        if hunk_size % CD_FRAME_SIZE != 0 {
+            return Err(Error::CodecError);
+        }
+        let frames = hunk_size / CD_FRAME_SIZE;
+        Ok(CdFlacEncoder {
+            frames,
+            block_size: cd_flac_blocksize(frames * CD_MAX_SECTOR_DATA),
+            sub_engine: super::zlib::ZlibEncoder::new(frames * CD_MAX_SUBCODE_DATA)?,
+            buffer: vec![0u8; hunk_size as usize],
+        })
+    }
+
+    fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize> {
+        let frames = self.frames as usize;
+        let sect_total = frames * CD_MAX_SECTOR_DATA as usize;
+        let sub_total = frames * CD_MAX_SUBCODE_DATA as usize;
+
+        // de-swizzle [sector ‖ subcode] frames into the sector run then the subcode run (no ECC strip)
+        for f in 0..frames {
+            let src = &input[f * CD_FRAME_SIZE as usize..];
+            self.buffer[f * CD_MAX_SECTOR_DATA as usize..][..CD_MAX_SECTOR_DATA as usize]
+                .copy_from_slice(&src[..CD_MAX_SECTOR_DATA as usize]);
+            self.buffer[sect_total + f * CD_MAX_SUBCODE_DATA as usize..]
+                [..CD_MAX_SUBCODE_DATA as usize]
+                .copy_from_slice(
+                    &src[CD_MAX_SECTOR_DATA as usize..][..CD_MAX_SUBCODE_DATA as usize],
+                );
+        }
+
+        // FLAC-encode the sector run as big-endian interleaved 16-bit stereo (no endian flag byte).
+        let samples: Vec<i32> = self.buffer[..sect_total]
+            .chunks_exact(2)
+            .map(|b| i16::from_be_bytes([b[0], b[1]]) as i32)
+            .collect();
+        let enc = libflac_rs::Encoder::new(libflac_rs::EncoderConfig::chd(self.block_size));
+        let flac = enc.encode_frames(&samples);
+        if flac.len() >= input.len() || flac.len() > output.len() {
+            return Err(Error::CompressionError);
+        }
+        output[..flac.len()].copy_from_slice(&flac);
+
+        // raw-deflate the subcode run directly after the FLAC stream
+        let sub_n = self.sub_engine.compress(
+            &self.buffer[sect_total..sect_total + sub_total],
+            &mut output[flac.len()..],
+        )?;
+
+        let total = flac.len() + sub_n;
+        if total >= input.len() {
+            return Err(Error::CompressionError);
+        }
+        Ok(total)
+    }
+}
+
+#[cfg(feature = "write")]
+impl crate::compression::CompressionEncoder for CdFlacEncoder {}
+
+#[cfg(all(test, feature = "write", feature = "want_subcode"))]
+mod cd_flac_tests {
+    use super::*;
+    use crate::compression::codecs::CdFlacCodec;
+    use crate::compression::{CodecEncodeImplementation, CodecImplementation};
+
+    /// `CdFlacEncoder` → `CdFlacCodec` round-trips a CD hunk of smooth big-endian stereo audio
+    /// sectors (so FLAC engages) plus pseudo-random subcode.
+    #[test]
+    fn cd_flac_roundtrips() {
+        let frames = 8usize;
+        let hs = frames as u32 * CD_FRAME_SIZE;
+        let mut hunk = vec![0u8; hs as usize];
+        let (mut l, mut r, mut dl, mut dr): (i32, i32, i32, i32) = (0, 0, 37, 53);
+        let mut x = 0x9e37_79b9u32;
+        for f in 0..frames {
+            let frame = &mut hunk[f * CD_FRAME_SIZE as usize..][..CD_FRAME_SIZE as usize];
+            let (sector, subcode) = frame.split_at_mut(CD_MAX_SECTOR_DATA as usize);
+            for s in sector.chunks_exact_mut(4) {
+                l += dl;
+                if !(-20000..=20000).contains(&l) {
+                    dl = -dl;
+                    l += 2 * dl;
+                }
+                r += dr;
+                if !(-18000..=18000).contains(&r) {
+                    dr = -dr;
+                    r += 2 * dr;
+                }
+                s[0..2].copy_from_slice(&(l as i16).to_be_bytes());
+                s[2..4].copy_from_slice(&(r as i16).to_be_bytes());
+            }
+            for b in subcode.iter_mut() {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                *b = (x & 0xff) as u8;
+            }
+        }
+
+        let mut enc = CdFlacEncoder::new(hs).unwrap();
+        let mut comp = vec![0u8; hs as usize];
+        let n = enc.compress(&hunk, &mut comp).unwrap();
+        assert!(n < hunk.len(), "expected cdfl to shrink the audio hunk");
+
+        let mut dec = CdFlacCodec::new(hs).unwrap();
+        let mut out = vec![0u8; hs as usize];
+        let res = dec.decompress(&comp[..n], &mut out).unwrap();
+        assert_eq!(res.total_out(), hs as usize);
+        assert_eq!(out, hunk, "cdfl round-trip mismatch");
+    }
+}

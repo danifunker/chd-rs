@@ -1452,6 +1452,58 @@ fn raw_compressed_flac_roundtrips_via_chdman() {
     let _ = std::fs::remove_file(&out_path);
 }
 
+/// Dump a chd-rs `flac` CHD + its input to `C:\Temp\flac_check\` so an **external glibc-built
+/// chdman** can be compared byte-for-byte (our `libflac-rs` is validated vs glibc libm, but the
+/// usual oracle here is the MSVC chdman). `#[ignore]`d — run explicitly when a glibc chdman is
+/// available: `cargo test ... dump_flac_artifacts_for_glibc_check -- --ignored`.
+#[test]
+#[ignore = "writes flac artifacts for an external glibc-chdman byte-identity check"]
+fn dump_flac_artifacts_for_glibc_check() {
+    let dir = std::path::Path::new(r"C:\Temp\flac_check");
+    std::fs::create_dir_all(dir).unwrap();
+    let (hunk, unit) = (4096u32, 512u32);
+    let input = make_audio_input((hunk * 8) as usize);
+    std::fs::write(dir.join("input.bin"), &input).unwrap();
+
+    let mut ours = std::io::Cursor::new(Vec::new());
+    crate::write::write_raw_compressed(&mut ours, &input, hunk, unit, CodecType::FlacV5).unwrap();
+    std::fs::write(dir.join("ours.chd"), ours.into_inner()).unwrap();
+    eprintln!("wrote {}\\input.bin and ours.chd", dir.display());
+}
+
+/// Dump a chd-rs **`cdfl`** CD CHD (single AUDIO track of smooth PCM, so FLAC engages) + its CUE/BIN
+/// to `C:\Temp\cdfl_check\` for a byte-for-byte comparison against an external glibc chdman:
+/// `chdman createcd -i audio.cue -o chdman.chd -c cdfl`. `#[ignore]`d (libm-gated, glibc only).
+#[test]
+#[ignore = "writes cdfl artifacts for an external glibc-chdman byte-identity check"]
+fn dump_cdfl_artifacts_for_glibc_check() {
+    use crate::cd::{self, CdCreateOptions};
+
+    let dir = std::path::Path::new(r"C:\Temp\cdfl_check");
+    std::fs::create_dir_all(dir).unwrap();
+    // 64 AUDIO sectors (8 full hunks, no padding) of smooth stereo PCM.
+    let bin = make_audio_input(64 * 2352);
+    std::fs::write(dir.join("audio.bin"), &bin).unwrap();
+    std::fs::write(
+        dir.join("audio.cue"),
+        b"FILE \"audio.bin\" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n".as_slice(),
+    )
+    .unwrap();
+
+    cd::create_from_cue(
+        &dir.join("audio.cue"),
+        &dir.join("ours.chd"),
+        CdCreateOptions {
+            codecs: [crate::CHD_CODEC_CD_FLAC, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+    eprintln!("wrote cdfl artifacts to {}", dir.display());
+}
+
 /// End-to-end compressed CHD with **lzma** (an external-crate codec) and a **partial last
 /// hunk** — confirms the driver is codec-agnostic and that `raw_sha1` is over the logical
 /// (unpadded) data with the final hunk zero-padded.

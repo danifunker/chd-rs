@@ -29,6 +29,8 @@ pub mod codecs {
 
     // Encoders (write feature). Added per-codec as milestones land.
     #[cfg(feature = "write")]
+    pub use crate::compression::flac::CdFlacEncoder;
+    #[cfg(feature = "write")]
     pub use crate::compression::flac::RawFlacEncoder;
     #[cfg(feature = "write")]
     pub use crate::compression::huff::HuffmanEncoder;

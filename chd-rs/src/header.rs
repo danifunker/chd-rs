@@ -140,6 +140,8 @@ impl CodecType {
             CodecType::FlacV5 => {
                 RawFlacEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
             }
+            CodecType::FlacCdV5 => crate::compression::codecs::CdFlacEncoder::new(hunk_size)
+                .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
             CodecType::ZLibCdV5 => crate::compression::codecs::CdZlibEncoder::new(hunk_size)
                 .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
             CodecType::LzmaCdV5 => crate::compression::codecs::CdLzmaEncoder::new(hunk_size)

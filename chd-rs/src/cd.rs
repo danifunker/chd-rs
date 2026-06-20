@@ -12,8 +12,8 @@
 //! metadata, then reuse the shared V5 writer ([`write::write_create`](crate::write)). Output is
 //! **byte-identical to `chdman createcd`** (verified for `-c cdzl`/`cdlz`).
 //!
-//! Matches libchdman-rs's `cd` module. Extraction (`extractcd`), GDI/Nero parsing, `list_tracks`,
-//! and the `cdfl` encoder are not yet implemented.
+//! Matches libchdman-rs's `cd` module. All four CD codecs (`cdlz`/`cdzl`/`cdzs`/`cdfl`) encode;
+//! extraction (`extractcd`), GDI/Nero parsing, and `list_tracks` are not yet implemented.
 
 use crate::error::{Error, Result};
 use crate::{write, CompressionProgress, CHD_CODEC_CD_FLAC, CHD_CODEC_CD_LZMA, CHD_CODEC_CD_ZLIB};
@@ -476,9 +476,9 @@ pub struct CdCreateOptions {
     pub hunk_size: u32,
     /// Codec slots. Default `[cdlz, cdzl, cdfl, 0]` (chdman's `s_default_cd_compression`).
     ///
-    /// **Note:** the `cdfl` encoder is not yet implemented, so the default set currently fails in
-    /// [`create_from_cue`]/[`create_from_iso`]; pass an explicit working set such as
-    /// `[CHD_CODEC_CD_LZMA, CHD_CODEC_CD_ZLIB, 0, 0]` until `cdfl` lands.
+    /// All three are implemented and byte-identical to chdman, with one caveat: `cdfl`'s FLAC stream
+    /// is **libm-gated** (byte-identical to a *glibc* chdman, round-trip-correct against any build —
+    /// see [`CdFlacEncoder`](crate::compression)). The `cdlz`/`cdzl` hunks are always byte-identical.
     pub codecs: [u32; 4],
 }
 
