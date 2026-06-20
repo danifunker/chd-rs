@@ -1052,6 +1052,84 @@ fn delmeta_bit_exact_vs_chdman() {
     let _ = std::fs::remove_file(&reference);
 }
 
+/// `Chd::info` reports the right header fields + type flags (`is_hd`/`is_dvd`/…) for HD and DVD
+/// CHDs created by chd-rs.
+#[test]
+fn info_reports_hd_and_dvd() {
+    use crate::dvd::{self, DvdCreateOptions};
+    use crate::hd::{self, HdCreateOptions};
+
+    let dir = std::env::temp_dir();
+    let input = make_input(256 * 1024);
+
+    // HD (compressed zlib) → is_hd, GDDD, compressed.
+    let hd_in = dir.join("chdrs_info_hd_in.bin");
+    let hd_chd = dir.join("chdrs_info_hd.chd");
+    File::create(&hd_in).unwrap().write_all(&input).unwrap();
+    hd::create_from_path(
+        &hd_in,
+        &hd_chd,
+        HdCreateOptions {
+            codecs: [crate::CHD_CODEC_ZLIB, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+    {
+        let mut chd = Chd::open(BufReader::new(File::open(&hd_chd).unwrap()), None).unwrap();
+        let info = chd.info().unwrap();
+        assert_eq!(info.version, 5);
+        assert_eq!(info.hunk_bytes, 4096);
+        assert_eq!(info.unit_bytes, 512);
+        assert_eq!(info.logical_bytes, input.len() as u64);
+        assert_eq!(info.codecs[0], crate::CHD_CODEC_ZLIB);
+        assert!(info.compressed);
+        assert!(info.is_hd, "should be HD");
+        assert!(!info.is_dvd && !info.is_cd && !info.is_av && !info.is_gd);
+        assert!(!info.has_parent);
+        assert_eq!(info.track_count, 0);
+        assert!(info
+            .metadata_tags
+            .iter()
+            .any(|&(t, _)| t == crate::make_tag(b"GDDD")));
+    }
+
+    // DVD (uncompressed) → is_dvd, DVD record, 2048 units, not compressed.
+    let dvd_in = dir.join("chdrs_info_dvd_in.iso");
+    let dvd_chd = dir.join("chdrs_info_dvd.chd");
+    File::create(&dvd_in).unwrap().write_all(&input).unwrap();
+    dvd::create_from_iso(
+        &dvd_in,
+        &dvd_chd,
+        DvdCreateOptions {
+            codecs: [0, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+    {
+        let mut chd = Chd::open(BufReader::new(File::open(&dvd_chd).unwrap()), None).unwrap();
+        let info = chd.info().unwrap();
+        assert!(info.is_dvd, "should be DVD");
+        assert!(!info.is_hd);
+        assert!(!info.compressed);
+        assert_eq!(info.unit_bytes, 2048);
+        assert!(info
+            .metadata_tags
+            .iter()
+            .any(|&(t, _)| t == crate::make_tag(b"DVD ")));
+    }
+
+    let _ = std::fs::remove_file(&hd_in);
+    let _ = std::fs::remove_file(&hd_chd);
+    let _ = std::fs::remove_file(&dvd_in);
+    let _ = std::fs::remove_file(&dvd_chd);
+}
+
 /// Build `pattern_ids.len()` hunks; hunks sharing a pattern id are byte-identical (forcing
 /// `COMPRESSION_SELF` refs). Pattern 0 is all-zeros; others are a distinct compressible sawtooth.
 fn build_hunks(hunk_size: usize, pattern_ids: &[u8]) -> Vec<u8> {

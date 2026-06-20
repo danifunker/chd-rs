@@ -103,6 +103,69 @@ impl<F: Read + Seek> Chd<F> {
         &self.map
     }
 
+    /// Returns an aggregate [`ChdInfo`](crate::ChdInfo) snapshot of this CHD's header and metadata
+    /// (the data chdman's `info` subcommand reports; mirrors libchdman-rs's `Chd::info`).
+    ///
+    /// Walks the metadata once to derive the tag list, track count, and the `is_hd`/`is_cd`/
+    /// `is_gd`/`is_dvd`/`is_av` type flags (each a metadata-tag-presence check, exactly as MAME's
+    /// `check_is_*`).
+    pub fn info(&mut self) -> Result<crate::ChdInfo> {
+        use crate::make_tag;
+        use crate::metadata::MetadataTag;
+
+        let h = self.header();
+        let version = h.version() as u32;
+        let hunk_bytes = h.hunk_size();
+        let unit_bytes = h.unit_bytes();
+        let hunk_count = h.hunk_count();
+        let logical_bytes = h.logical_bytes();
+        let codecs = h.compression();
+        let sha1 = h.sha1().unwrap_or([0u8; 20]);
+        let raw_sha1 = h.raw_sha1().unwrap_or([0u8; 20]);
+        let parent_sha1 = h.parent_sha1().unwrap_or([0u8; 20]);
+        let has_parent = h.has_parent();
+        let compressed = codecs[0] != 0;
+
+        // Walk the metadata once, recording each entry's tag + its per-tag index.
+        let mut metadata_tags: Vec<(u32, u32)> = Vec::new();
+        let mut per_tag: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for m in self.metadata_refs() {
+            let tag = m.metatag();
+            let idx = per_tag.entry(tag).or_insert(0);
+            metadata_tags.push((tag, *idx));
+            *idx += 1;
+        }
+
+        let has = |t: &[u8; 4]| metadata_tags.iter().any(|&(tag, _)| tag == make_tag(t));
+        let count = |t: &[u8; 4]| {
+            metadata_tags
+                .iter()
+                .filter(|&&(tag, _)| tag == make_tag(t))
+                .count() as u32
+        };
+
+        Ok(crate::ChdInfo {
+            version,
+            hunk_bytes,
+            unit_bytes,
+            hunk_count,
+            logical_bytes,
+            codecs,
+            sha1,
+            raw_sha1,
+            parent_sha1,
+            track_count: count(b"CHT2") + count(b"CHTR") + count(b"CHGD"),
+            is_hd: has(b"GDDD"),
+            is_cd: has(b"CHCD") || has(b"CHTR") || has(b"CHT2"),
+            is_gd: has(b"CHGT") || has(b"CHGD"),
+            is_dvd: has(b"DVD "),
+            is_av: has(b"AVAV"),
+            metadata_tags,
+            compressed,
+            has_parent,
+        })
+    }
+
     /// Returns a reference to the given hunk in this CHD file.
     ///
     /// If the requested hunk is larger than the number of hunks in the CHD file,

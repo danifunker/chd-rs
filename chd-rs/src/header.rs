@@ -506,6 +506,21 @@ impl Header {
         }
     }
 
+    /// Returns the compression codecs as a 4-slot array of FourCCs.
+    ///
+    /// V5 CHDs store up to four codec FourCCs (slot 0 the primary; `0` = unused). Legacy (V1-4)
+    /// CHDs have a single codec, returned in slot 0 with the rest zero. A slot-0 value of `0`
+    /// (`CHD_CODEC_NONE`) means the CHD is uncompressed.
+    pub fn compression(&self) -> [u32; 4] {
+        match self {
+            Header::V1Header(c) => [c.compression, 0, 0, 0],
+            Header::V2Header(c) => [c.compression, 0, 0, 0],
+            Header::V3Header(c) => [c.compression, 0, 0, 0],
+            Header::V4Header(c) => [c.compression, 0, 0, 0],
+            Header::V5Header(c) => c.compression,
+        }
+    }
+
     /// Returns the MD5 of the CHD file if available.
     pub fn md5(&self) -> Option<[u8; MD5_BYTES]> {
         match self {

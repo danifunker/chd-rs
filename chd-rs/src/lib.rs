@@ -173,6 +173,49 @@ pub use codec::{
     CHD_CODEC_LZMA, CHD_CODEC_NONE, CHD_CODEC_ZLIB, CHD_CODEC_ZSTD,
 };
 
+/// Aggregate snapshot of a CHD's header + metadata, returned by [`Chd::info`]. Mirrors the data
+/// chdman's `info` subcommand reports (and libchdman-rs's `ChdInfo`).
+#[derive(Debug, Clone)]
+pub struct ChdInfo {
+    /// CHD format version (1–5).
+    pub version: u32,
+    /// Hunk size in bytes.
+    pub hunk_bytes: u32,
+    /// Unit (sector) size in bytes.
+    pub unit_bytes: u32,
+    /// Total hunk count.
+    pub hunk_count: u32,
+    /// Logical (uncompressed) size in bytes.
+    pub logical_bytes: u64,
+    /// Per-slot codec FourCCs (slot 0..=3); `0` means an unused slot / no compression.
+    pub codecs: [u32; 4],
+    /// Overall SHA-1 (zero if the header has none, e.g. an uncompressed CHD).
+    pub sha1: [u8; 20],
+    /// Raw (hunk-data) SHA-1 (zero if the header has none).
+    pub raw_sha1: [u8; 20],
+    /// Parent SHA-1 (zero if the CHD has no parent).
+    pub parent_sha1: [u8; 20],
+    /// Every metadata entry in stored order, paired with its per-tag index (so `(CHT2, 0)`,
+    /// `(CHT2, 1)`, … are distinguishable).
+    pub metadata_tags: Vec<(u32, u32)>,
+    /// Count of CD/GD track records (`CHT2` + `CHTR` + `CHGD`).
+    pub track_count: u32,
+    /// Whether the CHD is compressed (codec slot 0 is not `CHD_CODEC_NONE`).
+    pub compressed: bool,
+    /// Whether the CHD references a parent.
+    pub has_parent: bool,
+    /// Carries a `GDDD` hard-disk record.
+    pub is_hd: bool,
+    /// Carries CD-ROM records (`CHCD`/`CHTR`/`CHT2`).
+    pub is_cd: bool,
+    /// Carries GD-ROM records (`CHGT`/`CHGD`).
+    pub is_gd: bool,
+    /// Carries a `DVD ` record.
+    pub is_dvd: bool,
+    /// Carries A/V records (`AVAV`).
+    pub is_av: bool,
+}
+
 /// Progress of a create/compress operation, passed to the `progress` callback that the create
 /// functions in [`hd`](crate::hd) (and, later, `cd`/`dvd`/`copy`) take. Matches libchdman-rs's
 /// `CompressionProgress` field-for-field.
