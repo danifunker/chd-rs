@@ -58,4 +58,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      # `cargo fmt -p chd` runs `cargo metadata`, which resolves the workspace — including the
+      # write feature's sibling path deps — so they must be present even for a formatting check.
+      - name: Clone sibling codec crates
+        shell: bash
+        run: |
+          cd "${GITHUB_WORKSPACE}/.."
+          git clone --depth 1 --branch v0.2301.0 https://github.com/danifunker/lzma-sdk-rs.git
+          git clone --depth 1 --branch v0.143.0  https://github.com/danifunker/libflac-rs.git
+          git clone --depth 1 --branch v0.131.0  https://github.com/danifunker/zlib-bitexact-rs.git
+          git clone --depth 1 --branch v0.155.0  https://github.com/danifunker/libzstd-bitexact-rs.git
       - run: cargo fmt -p chd --check
