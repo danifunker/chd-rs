@@ -2031,3 +2031,63 @@ fn cooked_iso_strips_mode1_raw() {
         let _ = std::fs::remove_file(p);
     }
 }
+
+/// Full **createcd from a `.gdi`** byte-identity (GD-ROM): a 3-track Dreamcast index (data / audio /
+/// data) with small inter-track LBA gaps → per-track `padframes`. chd-rs `cd::create_from_gdi` must
+/// equal `chdman createcd -c cdlz` byte-for-byte — exercising the GDI parser, the `padframes`
+/// zero-fill in the logical assembly, the audio byte-swap, and the `CHGD` (GD-ROM) metadata records.
+#[test]
+fn createcd_gdi_bit_exact_vs_chdman() {
+    use crate::cd::{self, CdCreateOptions};
+
+    let chdman = chdman_path();
+    let dir = std::env::temp_dir().join("chdrs_gdi");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // track1 data @ LBA 0 (90 frames), track2 audio @ LBA 100 (140 frames), track3 data @ LBA 250
+    // (50 frames). Gaps: track1 +10 pad (ends 90, next @ 100), track2 +10 pad (ends 240, next @ 250).
+    std::fs::write(dir.join("t1.bin"), build_mode1_bin(90)).unwrap();
+    std::fs::write(dir.join("t2.raw"), make_audio_input(140 * 2352)).unwrap();
+    std::fs::write(dir.join("t3.bin"), build_mode1_bin(50)).unwrap();
+    let gdi = "3\n1 0 4 2352 \"t1.bin\" 0\n2 100 0 2352 \"t2.raw\" 0\n3 250 4 2352 \"t3.bin\" 0\n";
+    std::fs::write(dir.join("disc.gdi"), gdi).unwrap();
+
+    let ref_chd = dir.join("ref.chd");
+    let ours_chd = dir.join("ours.chd");
+
+    let s = Command::new(&chdman)
+        .arg("createcd")
+        .args(["-i".as_ref(), dir.join("disc.gdi").as_os_str()])
+        .args(["-o".as_ref(), ref_chd.as_os_str()])
+        .args(["-c", "cdlz"])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(s.success(), "chdman createcd (gdi) failed");
+    let reference = std::fs::read(&ref_chd).unwrap();
+
+    cd::create_from_gdi(
+        &dir.join("disc.gdi"),
+        &ours_chd,
+        CdCreateOptions {
+            codecs: [crate::CHD_CODEC_CD_LZMA, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+    let ours = std::fs::read(&ours_chd).unwrap();
+
+    assert_eq!(
+        ours.len(),
+        reference.len(),
+        "createcd gdi size differs: ours={}, chdman={}",
+        ours.len(),
+        reference.len()
+    );
+    assert_eq!(ours, reference, "createcd gdi bytes differ from chdman");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

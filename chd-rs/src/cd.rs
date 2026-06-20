@@ -16,8 +16,10 @@
 //! track table back, and [`extract_to_iso`] / [`CdCookedReader`] expose a single MODE1 track's
 //! cooked 2048-byte user data.
 //!
+//! [`create_from_gdi`] handles Sega Dreamcast `.gdi` indices (GD-ROM, `CHGD` metadata).
+//!
 //! Matches libchdman-rs's `cd` module. All four CD codecs (`cdlz`/`cdzl`/`cdzs`/`cdfl`) encode.
-//! GDI/Nero TOC parsing and `.gdi`/split-bin extraction are not yet implemented.
+//! Nero (`.nrg`) TOC parsing and `.gdi`/split-bin extraction are not yet implemented.
 
 use crate::error::{Error, Result};
 use crate::metadata::Metadata;
@@ -166,6 +168,8 @@ struct CdTrack {
     subsize: u32,
     frames: u32,
     extraframes: u32,
+    /// Trailing zero-padding frames inside `frames` (GDI area-gap fill); not read from the source.
+    padframes: u32,
     pregap: u32,
     postgap: u32,
     pgtype: TrackType,
@@ -188,6 +192,7 @@ impl CdTrack {
             subsize: 0,
             frames: 0,
             extraframes: 0,
+            padframes: 0,
             pregap: 0,
             postgap: 0,
             // pgtype defaults to MODE1 (chdman's zero-initialised `pgtype`), pgsub to NONE.
@@ -458,12 +463,15 @@ fn assemble_logical(tracks: &mut [CdTrack]) -> Result<Vec<u8>> {
     let mut dest_frame: u64 = 0;
     for t in tracks.iter() {
         let bpf = (t.datasize + t.subsize) as usize;
-        if t.frames > 0 {
+        // The trailing `padframes` (GDI area-gap fill) and `extraframes` (4-frame alignment) have no
+        // source data — only `frames - padframes` real sectors are read; the rest stay zero.
+        let real = t.frames.saturating_sub(t.padframes) as usize;
+        if real > 0 {
             let mut f = File::open(&t.fname)?;
             f.seek(SeekFrom::Start(t.offset))?;
-            let mut block = vec![0u8; t.frames as usize * bpf];
+            let mut block = vec![0u8; real * bpf];
             f.read_exact(&mut block)?;
-            for fr in 0..t.frames as usize {
+            for fr in 0..real {
                 let dst = (dest_frame as usize + fr) * frame_size;
                 logical[dst..dst + bpf].copy_from_slice(&block[fr * bpf..(fr + 1) * bpf]);
                 if t.swap {
@@ -481,31 +489,47 @@ fn assemble_logical(tracks: &mut [CdTrack]) -> Result<Vec<u8>> {
     Ok(logical)
 }
 
-/// Build the per-track `CHT2` metadata payloads (`CDROM_TRACK_METADATA2_FORMAT`, `chd.cpp:39` +
-/// `write_metadata`, `cdrom.cpp:1065`). Each payload is the formatted C string **plus its NUL
-/// terminator** (chdman stores `string.length() + 1` bytes). `PGTYPE` is the pregap type string,
-/// prefixed with `V` when the pregap carries data (`pgdatasize > 0`).
-fn build_cht2_payloads(tracks: &[CdTrack]) -> Vec<Vec<u8>> {
+/// Build the per-track metadata payloads (`write_metadata`, `cdrom.cpp:1065`). For a CD this is the
+/// `CHT2` `CDROM_TRACK_METADATA2_FORMAT` (`chd.cpp:39`) where `PGTYPE` is `V`-prefixed when the
+/// pregap carries data; for a GD-ROM (`gdrom`) it's the `CHGD` `GDROM_TRACK_METADATA_FORMAT`
+/// (`chd.cpp:40`) which adds a `PAD:` field and uses the plain pregap type string. Each payload is
+/// the formatted C string **plus its NUL terminator** (chdman stores `string.length() + 1` bytes).
+fn build_track_metadata(tracks: &[CdTrack], gdrom: bool) -> Vec<Vec<u8>> {
     tracks
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let submode = if t.pgdatasize > 0 {
-                format!("V{}", t.pgtype.type_string())
+            let s = if gdrom {
+                format!(
+                    "TRACK:{} TYPE:{} SUBTYPE:{} FRAMES:{} PAD:{} PREGAP:{} PGTYPE:{} PGSUB:{} POSTGAP:{}",
+                    i + 1,
+                    t.trktype.type_string(),
+                    t.subtype.subtype_string(),
+                    t.frames,
+                    t.padframes,
+                    t.pregap,
+                    t.pgtype.type_string(),
+                    t.pgsub.subtype_string(),
+                    t.postgap,
+                )
             } else {
-                t.pgtype.type_string().to_string()
+                let submode = if t.pgdatasize > 0 {
+                    format!("V{}", t.pgtype.type_string())
+                } else {
+                    t.pgtype.type_string().to_string()
+                };
+                format!(
+                    "TRACK:{} TYPE:{} SUBTYPE:{} FRAMES:{} PREGAP:{} PGTYPE:{} PGSUB:{} POSTGAP:{}",
+                    i + 1,
+                    t.trktype.type_string(),
+                    t.subtype.subtype_string(),
+                    t.frames,
+                    t.pregap,
+                    submode,
+                    t.pgsub.subtype_string(),
+                    t.postgap,
+                )
             };
-            let s = format!(
-                "TRACK:{} TYPE:{} SUBTYPE:{} FRAMES:{} PREGAP:{} PGTYPE:{} PGSUB:{} POSTGAP:{}",
-                i + 1,
-                t.trktype.type_string(),
-                t.subtype.subtype_string(),
-                t.frames,
-                t.pregap,
-                submode,
-                t.pgsub.subtype_string(),
-                t.postgap,
-            );
             let mut bytes = s.into_bytes();
             bytes.push(0); // C-string NUL terminator, included in the stored length
             bytes
@@ -535,10 +559,12 @@ impl Default for CdCreateOptions {
     }
 }
 
-/// Shared back end for [`create_from_cue`]/[`create_from_iso`]: assemble the logical image + `CHT2`
-/// metadata from `tracks` and hand off to the V5 writer, **byte-identical to `chdman createcd`**.
+/// Shared back end for the create paths: assemble the logical image + per-track metadata from
+/// `tracks` and hand off to the V5 writer, **byte-identical to `chdman createcd`**. `gdrom` selects
+/// the `CHGD` (GD-ROM) vs `CHT2` (CD) metadata record.
 fn build_cd<W: Write + Seek>(
     mut tracks: Vec<CdTrack>,
+    gdrom: bool,
     out: &mut W,
     opts: CdCreateOptions,
     progress: &mut dyn FnMut(CompressionProgress),
@@ -548,11 +574,16 @@ fn build_cd<W: Write + Seek>(
         return Err(Error::InvalidParameter);
     }
     let logical = assemble_logical(&mut tracks)?;
-    let payloads = build_cht2_payloads(&tracks);
+    let payloads = build_track_metadata(&tracks, gdrom);
+    let tag = if gdrom {
+        crate::make_tag(b"CHGD")
+    } else {
+        crate::make_tag(b"CHT2")
+    };
     let entries: Vec<write::MetaEntry> = payloads
         .iter()
         .map(|p| write::MetaEntry {
-            tag: crate::make_tag(b"CHT2"),
+            tag,
             flags: write::CHD_MDFLAGS_CHECKSUM,
             payload: p,
         })
@@ -588,7 +619,7 @@ pub fn create_from_cue(
     cancel: &dyn Fn() -> bool,
 ) -> Result<()> {
     let tracks = parse_cue(cue_path)?;
-    create_to_path(tracks, out_path, opts, progress, cancel)
+    create_to_path(tracks, false, out_path, opts, progress, cancel)
 }
 
 /// Create a CD CHD from a flat sector image (`.iso`/`.bin`) at `iso_path`, **byte-identical to
@@ -603,23 +634,117 @@ pub fn create_from_iso(
     cancel: &dyn Fn() -> bool,
 ) -> Result<()> {
     let tracks = parse_iso(iso_path)?;
-    create_to_path(tracks, out_path, opts, progress, cancel)
+    create_to_path(tracks, false, out_path, opts, progress, cancel)
+}
+
+/// Create a GD-ROM CHD from a Sega Dreamcast `.gdi` index at `gdi_path`, **byte-identical to
+/// `chdman createcd`**. Port of `parse_gdi` (`cdrom.cpp:2115`): each track's frame count comes from
+/// its file size, and the gap up to the next track's LBA becomes trailing `padframes` on the
+/// previous track (the high-density area split). Writes `CHGD` (GD-ROM) metadata. See
+/// [`create_from_cue`] for callback/cleanup behaviour.
+pub fn create_from_gdi(
+    gdi_path: &Path,
+    out_path: &Path,
+    opts: CdCreateOptions,
+    progress: &mut dyn FnMut(CompressionProgress),
+    cancel: &dyn Fn() -> bool,
+) -> Result<()> {
+    let tracks = parse_gdi(gdi_path)?;
+    create_to_path(tracks, true, out_path, opts, progress, cancel)
 }
 
 fn create_to_path(
     tracks: Vec<CdTrack>,
+    gdrom: bool,
     out_path: &Path,
     opts: CdCreateOptions,
     progress: &mut dyn FnMut(CompressionProgress),
     cancel: &dyn Fn() -> bool,
 ) -> Result<()> {
     let mut out = File::create(out_path)?;
-    let res = build_cd(tracks, &mut out, opts, progress, cancel);
+    let res = build_cd(tracks, gdrom, &mut out, opts, progress, cancel);
     if res.is_err() {
         drop(out);
         let _ = std::fs::remove_file(out_path);
     }
     res
+}
+
+/// Parse a Sega Dreamcast `.gdi` index into a track list (port of `cdrom_file::parse_gdi`,
+/// `cdrom.cpp:2115`). First line is the track count; each subsequent line is
+/// `tracknum lba type sectorsize "file" offset` (`type` 4 = data, 0 = audio). Each track's frames
+/// come from its file size; the LBA gap to the next track becomes the previous track's `padframes`.
+fn parse_gdi(gdi_path: &Path) -> Result<Vec<CdTrack>> {
+    let text = std::fs::read_to_string(gdi_path)?;
+    let dir = gdi_path.parent().unwrap_or_else(|| Path::new(""));
+
+    let mut lines = text.lines();
+    let numtracks: usize = lines
+        .next()
+        .and_then(|l| l.split_whitespace().next())
+        .and_then(|t| t.parse().ok())
+        .ok_or(Error::InvalidData)?;
+    if numtracks == 0 {
+        return Err(Error::InvalidData);
+    }
+
+    let mut slots: Vec<Option<CdTrack>> = (0..numtracks).map(|_| None).collect();
+    let mut physframeofs = vec![0u32; numtracks];
+    for line in lines {
+        let toks = tokenize_line(line);
+        if toks.is_empty() {
+            continue;
+        }
+        if toks.len() != 6 {
+            return Err(Error::InvalidData);
+        }
+        let trknum = toks[0]
+            .parse::<i64>()
+            .ok()
+            .filter(|&n| n >= 1)
+            .ok_or(Error::InvalidData)? as usize
+            - 1;
+        if trknum >= numtracks {
+            return Err(Error::InvalidData);
+        }
+        let pfo: u32 = toks[1].parse().map_err(|_| Error::InvalidData)?;
+        let trktype: u32 = toks[2].parse().map_err(|_| Error::InvalidData)?;
+        let trksize: u32 = toks[3].parse().map_err(|_| Error::InvalidData)?;
+        if trksize == 0 {
+            return Err(Error::InvalidData);
+        }
+        let (tt, datasize, swap) = match (trktype, trksize) {
+            (4, 2352) => (TrackType::Mode1Raw, 2352, false),
+            (4, 2048) => (TrackType::Mode1, 2048, false),
+            (0, _) => (TrackType::Audio, 2352, true),
+            _ => return Err(Error::UnsupportedFormat),
+        };
+        let fname = dir.join(&toks[4]);
+        let sz = file_size(&fname)?;
+        let mut t = CdTrack::new(tt, datasize, fname, swap);
+        t.frames = (sz / trksize as u64) as u32;
+        physframeofs[trknum] = pfo;
+        slots[trknum] = Some(t);
+    }
+
+    let mut tracks: Vec<CdTrack> = slots
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or(Error::InvalidData)?;
+
+    // The gap between a track's LBA and the previous track's end is padding appended to the
+    // previous track (chdman's `frames[trk-1] += dif; padframes[trk-1] = dif`).
+    for trk in 1..numtracks {
+        let prev_end = tracks[trk - 1].frames as i64 + physframeofs[trk - 1] as i64;
+        let dif = physframeofs[trk] as i64 - prev_end;
+        if dif < 0 {
+            return Err(Error::InvalidData);
+        }
+        tracks[trk - 1].frames += dif as u32;
+        tracks[trk - 1].padframes = dif as u32;
+    }
+
+    Ok(tracks)
 }
 
 // ---------------------------------------------------------------------------
