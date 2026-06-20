@@ -1505,3 +1505,231 @@ fn raw_compressed_lzma_partial_chd_bit_exact_vs_chdman() {
     let _ = std::fs::remove_file(&in_path);
     let _ = std::fs::remove_file(&chd_path);
 }
+
+/// Build `nsectors` MODE1/2352 sectors (sync header + MODE1 byte + compressible payload + a freshly
+/// generated valid P/Q ECC, so the CD codec strips them). Same construction the per-hunk CD codec
+/// test uses, hoisted for the `createcd` container tests.
+fn build_mode1_bin(nsectors: usize) -> Vec<u8> {
+    use crate::cdrom::{CD_MAX_SECTOR_DATA, CD_MODE_OFFSET, CD_SYNC_HEADER};
+    use crate::compression::ecc::ErrorCorrectedSector;
+
+    let mut bin = make_input(nsectors * CD_MAX_SECTOR_DATA as usize);
+    for s in 0..nsectors {
+        let sector = &mut bin[s * CD_MAX_SECTOR_DATA as usize..][..CD_MAX_SECTOR_DATA as usize];
+        sector[..CD_SYNC_HEADER.len()].copy_from_slice(&CD_SYNC_HEADER);
+        sector[CD_MODE_OFFSET] = 1; // MODE1
+        let mut sec = <&mut [u8; CD_MAX_SECTOR_DATA as usize]>::try_from(&mut sector[..]).unwrap();
+        sec.generate_ecc();
+    }
+    bin
+}
+
+/// Full **createcd** byte-identity for a single MODE1/2352 track: chd-rs `cd::create_from_cue`
+/// (CUE parse → 2448-byte-frame assembly → `CHT2` metadata → V5 writer) must equal
+/// `chdman createcd -c <mnemonic>` byte-for-byte. 50 frames → 7 hunks (a partial last hunk).
+fn assert_createcd_cue_bit_exact(mnemonic: &str, codecs: [u32; 4]) {
+    use crate::cd::{self, CdCreateOptions};
+
+    let chdman = chdman_path();
+    let dir = std::env::temp_dir();
+    let bin_path = dir.join(format!("chdrs_createcd_{mnemonic}.bin"));
+    let cue_path = dir.join(format!("chdrs_createcd_{mnemonic}.cue"));
+    let ours_path = dir.join(format!("chdrs_createcd_ours_{mnemonic}.chd"));
+    let ref_path = dir.join(format!("chdrs_createcd_ref_{mnemonic}.chd"));
+
+    let bin = build_mode1_bin(50);
+    File::create(&bin_path).unwrap().write_all(&bin).unwrap();
+    let bin_name = bin_path.file_name().unwrap().to_str().unwrap();
+    let cue = format!("FILE \"{bin_name}\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n");
+    File::create(&cue_path)
+        .unwrap()
+        .write_all(cue.as_bytes())
+        .unwrap();
+
+    let status = Command::new(&chdman)
+        .arg("createcd")
+        .arg("-i")
+        .arg(&cue_path)
+        .arg("-o")
+        .arg(&ref_path)
+        .args(["-c", mnemonic])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(status.success(), "chdman createcd -c {mnemonic} failed");
+    let reference = std::fs::read(&ref_path).unwrap();
+
+    cd::create_from_cue(
+        &cue_path,
+        &ours_path,
+        CdCreateOptions {
+            codecs,
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+    let ours = std::fs::read(&ours_path).unwrap();
+
+    assert_eq!(
+        ours.len(),
+        reference.len(),
+        "createcd -c {mnemonic} size differs: ours={}, chdman={}",
+        ours.len(),
+        reference.len()
+    );
+    assert_eq!(
+        ours, reference,
+        "createcd -c {mnemonic} bytes differ from chdman"
+    );
+
+    let _ = std::fs::remove_file(&bin_path);
+    let _ = std::fs::remove_file(&cue_path);
+    let _ = std::fs::remove_file(&ours_path);
+    let _ = std::fs::remove_file(&ref_path);
+}
+
+#[test]
+fn createcd_cue_cdzl_bit_exact_vs_chdman() {
+    assert_createcd_cue_bit_exact("cdzl", [crate::CHD_CODEC_CD_ZLIB, 0, 0, 0]);
+}
+
+#[test]
+fn createcd_cue_cdlz_bit_exact_vs_chdman() {
+    assert_createcd_cue_bit_exact("cdlz", [crate::CHD_CODEC_CD_LZMA, 0, 0, 0]);
+}
+
+/// **createcd** byte-identity for a **multi-track** single-BIN CUE: a MODE1/2352 data track
+/// followed by an AUDIO track with an in-file pregap (`INDEX 00`/`INDEX 01`). Exercises per-track
+/// `CHT2` (incl. the `V`-prefixed `PGTYPE` for a data-bearing pregap), the audio byte-swap, and the
+/// 4-frame track padding between tracks.
+fn assert_createcd_multitrack_bit_exact(mnemonic: &str, codecs: [u32; 4]) {
+    use crate::cd::{self, CdCreateOptions};
+
+    let chdman = chdman_path();
+    let dir = std::env::temp_dir();
+    let bin_path = dir.join(format!("chdrs_createcd_mt_{mnemonic}.bin"));
+    let cue_path = dir.join(format!("chdrs_createcd_mt_{mnemonic}.cue"));
+    let ours_path = dir.join(format!("chdrs_createcd_mt_ours_{mnemonic}.chd"));
+    let ref_path = dir.join(format!("chdrs_createcd_mt_ref_{mnemonic}.chd"));
+
+    // 50 MODE1 frames then 30 AUDIO frames, one bin. INDEX 00 of track 2 = frame 50 (so track 1 is
+    // 50 frames), INDEX 01 = frame 53 (a 3-frame pregap).
+    let mut bin = build_mode1_bin(50);
+    bin.extend_from_slice(&make_audio_input(30 * 2352));
+    File::create(&bin_path).unwrap().write_all(&bin).unwrap();
+    let bin_name = bin_path.file_name().unwrap().to_str().unwrap();
+    let cue = format!(
+        "FILE \"{bin_name}\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n  \
+         TRACK 02 AUDIO\n    INDEX 00 00:00:50\n    INDEX 01 00:00:53\n"
+    );
+    File::create(&cue_path)
+        .unwrap()
+        .write_all(cue.as_bytes())
+        .unwrap();
+
+    let status = Command::new(&chdman)
+        .arg("createcd")
+        .arg("-i")
+        .arg(&cue_path)
+        .arg("-o")
+        .arg(&ref_path)
+        .args(["-c", mnemonic])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(status.success(), "chdman createcd (multitrack) failed");
+    let reference = std::fs::read(&ref_path).unwrap();
+
+    cd::create_from_cue(
+        &cue_path,
+        &ours_path,
+        CdCreateOptions {
+            codecs,
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+    let ours = std::fs::read(&ours_path).unwrap();
+
+    assert_eq!(
+        ours.len(),
+        reference.len(),
+        "createcd multitrack size differs: ours={}, chdman={}",
+        ours.len(),
+        reference.len()
+    );
+    assert_eq!(
+        ours, reference,
+        "createcd multitrack bytes differ from chdman"
+    );
+
+    let _ = std::fs::remove_file(&bin_path);
+    let _ = std::fs::remove_file(&cue_path);
+    let _ = std::fs::remove_file(&ours_path);
+    let _ = std::fs::remove_file(&ref_path);
+}
+
+#[test]
+fn createcd_multitrack_cdlz_bit_exact_vs_chdman() {
+    assert_createcd_multitrack_bit_exact("cdlz", [crate::CHD_CODEC_CD_LZMA, 0, 0, 0]);
+}
+
+/// **createcd** from a flat `.iso` (no CUE): chd-rs `cd::create_from_iso` infers a single
+/// MODE1/2048 track from the 2048-multiple size and must match `chdman createcd` on the same file.
+#[test]
+fn createcd_iso_cdlz_bit_exact_vs_chdman() {
+    use crate::cd::{self, CdCreateOptions};
+
+    let chdman = chdman_path();
+    let dir = std::env::temp_dir();
+    let iso_path = dir.join("chdrs_createcd_iso.iso");
+    let ours_path = dir.join("chdrs_createcd_iso_ours.chd");
+    let ref_path = dir.join("chdrs_createcd_iso_ref.chd");
+
+    // 100 cooked MODE1/2048 sectors.
+    let iso = make_input(2048 * 100);
+    File::create(&iso_path).unwrap().write_all(&iso).unwrap();
+
+    let status = Command::new(&chdman)
+        .arg("createcd")
+        .arg("-i")
+        .arg(&iso_path)
+        .arg("-o")
+        .arg(&ref_path)
+        .args(["-c", "cdlz"])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(status.success(), "chdman createcd (iso) failed");
+    let reference = std::fs::read(&ref_path).unwrap();
+
+    cd::create_from_iso(
+        &iso_path,
+        &ours_path,
+        CdCreateOptions {
+            codecs: [crate::CHD_CODEC_CD_LZMA, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+    let ours = std::fs::read(&ours_path).unwrap();
+
+    assert_eq!(
+        ours.len(),
+        reference.len(),
+        "createcd iso size differs: ours={}, chdman={}",
+        ours.len(),
+        reference.len()
+    );
+    assert_eq!(ours, reference, "createcd iso bytes differ from chdman");
+
+    let _ = std::fs::remove_file(&iso_path);
+    let _ = std::fs::remove_file(&ours_path);
+    let _ = std::fs::remove_file(&ref_path);
+}

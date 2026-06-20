@@ -251,6 +251,11 @@ pub mod copy;
 #[cfg_attr(docsrs, doc(cfg(feature = "write")))]
 pub mod dvd;
 
+/// CD-ROM CHD creation (chdman `createcd`). Available with the `write` feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod cd;
+
 #[cfg(feature = "unstable_lending_iterators")]
 #[cfg_attr(docsrs, doc(cfg(unstable_lending_iterators)))]
 pub mod iter;
