@@ -17,15 +17,18 @@ compressed (now **multi-codec**: zlib/huff/lzma/zstd + **flac**), **self-hunk de
 `compress_v5_map`, and SHA-1, all verified end-to-end. All five bit-exact codec encoders are wired
 (flac via `libflac-rs`, round-trip-verified through chdman; byte-identity is libm-gated — see below).
 
-**Now:** **Phases A, B, C, and D are done.** A: `codec` module, `flac` encoder, multi-codec
-`write_raw`, `CompressionProgress` + `progress`/`cancel`, public `hd` createraw + extract + geometry.
-B: full **`createhd`** (metadata writer + overall SHA-1 + GDDD/IDNT). C: **`copy`** +
-**`write_metadata`/`delete_metadata`** on existing CHDs. D: **`dvd`** (`createdvd`/`extractdvd`).
-All byte-identical to chdman 0.288. Remaining: **E (`cd`)** — the big one (TOC parser, CD codecs,
-ECC, CHT2); then F (parent/diff + `HdImage`), G (`info`/`verify`, rchdman).
+**Now:** **Phases A, B, C, D are done, and Phase E `createcd` is byte-identical.** A: `codec`
+module, `flac` encoder, multi-codec `write_raw`, `CompressionProgress` + `progress`/`cancel`, public
+`hd` createraw + extract + geometry. B: full **`createhd`** (metadata writer + overall SHA-1 +
+GDDD/IDNT). C: **`copy`** + **`write_metadata`/`delete_metadata`** on existing CHDs. D: **`dvd`**
+(`createdvd`/`extractdvd`). E (in progress): CD codec encoders (cdzl/cdlz/cdzs) **and the
+**`createcd`** container** — `cd` module with a pure-Rust CUE/ISO TOC parser, CHT2 metadata, and
+`create_from_cue`/`create_from_iso`, all **byte-identical to `chdman createcd`**. Remaining E:
+`extractcd`, GDI/Nero, `list_tracks`, `CdCookedReader`, `cdfl`. Then F (parent/diff + `HdImage`),
+G (`info`/`verify`, rchdman).
 
 **Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target). See
-"Verification gates" below. **43 write/compat tests green** (the 5 failing `read_*` tests are
+"Verification gates" below. **54 write/compat/unit tests green** (the 5 failing `read_*` tests are
 pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`) and **verified green on GitHub Actions** (all 4 jobs:
 lint + test on ubuntu/windows/macos): clones the sibling codec crates at their tags (they're public),
 then `cargo build -p chd` + `cargo test -p chd --features write-zstd -- --skip tests::read` + fmt.
@@ -175,10 +178,18 @@ decision (may become a new crate).
       header). `CdZlibEncoder`/`CdLzmaEncoder`/`CdZstdEncoder`; wired into `init_encoder`.
       **`cdzl`/`cdlz` byte-identical to chdman** (per-hunk, MODE1 ECC-strip path) + round-trip.
       `CdFlacEncoder` (cdfl) still TODO (libm-gated; FLAC base + zlib subcode, no ECC strip).
-- [ ] CUE/GDI/ISO/Nero TOC parser (pure Rust)
-- [ ] CHT2 metadata; `TrackInfo`/`TrackType`/`SubcodeType`; `list_tracks`
-- [ ] `create_from_cue`/`create_from_iso`; `extract_to_cue`/`extract_to_iso`/`extract_to_gdi`
-- [ ] Tests: BIN/CUE round-trip, codec matrix, multi-track, GDI
+- [x] **CUE + ISO TOC parser** (pure Rust) ✅ — `parse_cue` (port of `cdrom.cpp:2336`: FILE/TRACK/
+      INDEX/PREGAP/POSTGAP, single- and multi-file BIN, the common MODE1/MODE2/AUDIO types, audio
+      byte-swap, 4-frame track padding) + `parse_iso` (size-inferred single track). GDI/Nero still TODO.
+- [x] **CHT2 metadata + `TrackType`/`SubcodeType`** ✅ — `CDROM_TRACK_METADATA2_FORMAT` payload
+      (string **+ NUL terminator**, *no* trailing space — verified vs chdman 0.288). `TrackInfo`/
+      `list_tracks` (read-side) still TODO.
+- [x] **`create_from_cue`/`create_from_iso`** ✅ — assemble the 2448-frame logical image (port of
+      `chd_cd_compressor::read_data`) + CHT2 + `write_create`; **byte-identical to `chdman createcd`**.
+      `extract_to_cue`/`extract_to_iso`/`extract_to_gdi` still TODO.
+- [x] **Tests** ✅ — `createcd -c cdzl`/`cdlz` byte-identical: single MODE1/2352 (partial last hunk),
+      **multi-track MODE1+AUDIO+in-file pregap** (V-prefixed PGTYPE, swap), and flat-ISO MODE1/2048.
+- [ ] GDI/Nero parser; `extractcd` (→cue/bin/gdi); `CdCookedReader`; `list_tracks`; `cdfl` encoder
 
 ## M7 — Parent/diff + `HdImage`
 
@@ -236,12 +247,28 @@ Tracked in detail in [docs/libchdman-parity.md](docs/libchdman-parity.md). Phase
   writing GDDD (+ optional IDNT), byte-identical to chdman.
 - [x] **C** — `copy` ✅ + `write_metadata`/`delete_metadata` on existing CHDs ✅ — all byte-identical.
 - [x] **D** — `dvd` ✅ — `createdvd`/`extractdvd` byte-identical (`DVD ` record, 2048 sectors).
-- [~] **E** — `cd`: **CD codec encoders (cdzl/cdlz) byte-identical** ✅; remaining = TOC parser +
-  CHT2 metadata + createcd/extractcd container + cdfl. · [ ] **F** — parent/diff + `HdImage` ·
+- [~] **E** — `cd`: CD codec encoders (cdzl/cdlz/cdzs) ✅ **and `createcd` (CUE/ISO parser + CHT2 +
+  `create_from_cue`/`create_from_iso`) byte-identical** ✅; remaining = `extractcd`, GDI/Nero,
+  `list_tracks`, `CdCookedReader`, `cdfl`. · [ ] **F** — parent/diff + `HdImage` ·
   [~] **G** — `Chd::info` ✅ + `ChdInfo`; `verify` (needs a read-side SHA-1 dep) + rchdman + docs.
 
 ## Session log
 
+- 2026-06-20: **Phase E `createcd` container — byte-identical to `chdman createcd`.** New public
+  `cd` module (`cd.rs`): a pure-Rust **CUE parser** (`parse_cue`, port of `cdrom.cpp:2336` — FILE/
+  TRACK/INDEX/PREGAP/POSTGAP, single- and multi-file BIN, MODE1/MODE2/AUDIO, the audio byte-swap,
+  the `idx0`/`idx1` track-length calc) + **ISO parser** (`parse_iso`, size-inferred single track);
+  `TrackType`/`SubcodeType` enums (+ `type_string`/`subtype_string`); **logical-image assembly**
+  (port of `chd_cd_compressor::read_data` — `(frames+extraframes)*2448` per track, source frames
+  zero-padded into 2448-byte slots, 4-frame `TRACK_PADDING`); **CHT2 metadata** per track; and
+  `create_from_cue`/`create_from_iso` reusing `write::write_create`. **Empirically corrected the
+  CHT2 format** by dumping a real chdman 0.288 CD: the payload is the `CDROM_TRACK_METADATA2_FORMAT`
+  string **+ a single NUL** (`strlen+1` bytes), with **NO trailing space** (the prior handoff note's
+  trailing space was wrong; the live MAME format string has none). Verified byte-identical to
+  `chdman createcd -c cdzl`/`cdlz`: single MODE1/2352 (partial last hunk), **multi-track
+  MODE1+AUDIO+in-file pregap** (V-prefixed PGTYPE), and flat-ISO MODE1/2048. 54 lib/compat tests
+  green (+4 createcd byte-identity, +3 cd unit). Remaining cd: `extractcd`, GDI/Nero, `list_tracks`,
+  `CdCookedReader`, `cdfl`.
 - 2026-06-20: **Phase E started — CD codec encoders, byte-identical to chdman.** Added
   `CdEncoder<Engine, SubEngine>` (`compression/cdrom.rs`), the encode mirror of `CdCodec`: port of
   MAME `chd_cd_compressor::compress` — de-swizzle `[sector(2352)‖subcode(96)]` frames, strip the
