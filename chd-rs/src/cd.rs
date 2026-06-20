@@ -16,10 +16,11 @@
 //! track table back, and [`extract_to_iso`] / [`CdCookedReader`] expose a single MODE1 track's
 //! cooked 2048-byte user data.
 //!
-//! [`create_from_gdi`] handles Sega Dreamcast `.gdi` indices (GD-ROM, `CHGD` metadata).
+//! [`create_from_gdi`] / [`extract_to_gdi`] handle Sega Dreamcast `.gdi` indices (GD-ROM, `CHGD`
+//! metadata, split per-track files), both byte-identical to chdman.
 //!
-//! Matches libchdman-rs's `cd` module. All four CD codecs (`cdlz`/`cdzl`/`cdzs`/`cdfl`) encode.
-//! Nero (`.nrg`) TOC parsing and `.gdi`/split-bin extraction are not yet implemented.
+//! Matches libchdman-rs's `cd` module. All four CD codecs (`cdlz`/`cdzl`/`cdzs`/`cdfl`) encode. Only
+//! Nero (`.nrg`) TOC parsing is not yet implemented.
 
 use crate::error::{Error, Result};
 use crate::metadata::Metadata;
@@ -751,15 +752,16 @@ fn parse_gdi(gdi_path: &Path) -> Result<Vec<CdTrack>> {
 // extractcd: read a CD CHD's track metadata + reconstruct cue/bin
 // ---------------------------------------------------------------------------
 
-/// A track parsed back from a CD CHD's `CHT2`/`CHTR` metadata, with the derived sizes the extractor
-/// needs (the read-side analogue of [`CdTrack`]). Port of `cdrom_file::parse_metadata`
-/// (`cdrom.cpp:899`) for the modern (`CHT2`) and legacy (`CHTR`) records.
+/// A track parsed back from a CD CHD's `CHT2`/`CHTR`/`CHGD`/`CHGT` metadata, with the derived sizes
+/// the extractor needs (the read-side analogue of [`CdTrack`]). Port of `cdrom_file::parse_metadata`
+/// (`cdrom.cpp:899`).
 struct TrackMeta {
     trktype: TrackType,
     datasize: u32,
     subtype: SubcodeType,
     frames: u32,
     extraframes: u32,
+    padframes: u32,
     pregap: u32,
     postgap: u32,
     pgtype: TrackType,
@@ -767,8 +769,7 @@ struct TrackMeta {
     pgdatasize: u32,
 }
 
-/// Parse a `CHT2` (`"TRACK:.. TYPE:.. SUBTYPE:.. FRAMES:.. PREGAP:.. PGTYPE:.. PGSUB:.. POSTGAP:.."`)
-/// or legacy `CHTR` (`"TRACK:.. TYPE:.. SUBTYPE:.. FRAMES:.."`) payload. Mirrors
+/// Parse a `CHT2`/`CHTR` (CD) or `CHGD`/`CHGT` (GD-ROM, with a `PAD:` field) track payload. Mirrors
 /// `parse_metadata`: the pregap type/subcode are applied only when `pregap > 0` (and `PGTYPE` is
 /// `V`-prefixed for a data-bearing pregap); the 4-frame `extraframes` padding is recomputed here.
 fn parse_track_metadata(payload: &[u8]) -> Option<TrackMeta> {
@@ -776,13 +777,14 @@ fn parse_track_metadata(payload: &[u8]) -> Option<TrackMeta> {
     let s = s.trim_end_matches('\0');
 
     let (mut typ, mut subtype, mut pgtype_s, mut pgsub_s) = ("", "", "", "");
-    let (mut frames, mut pregap, mut postgap) = (None::<u32>, 0u32, 0u32);
+    let (mut frames, mut pregap, mut postgap, mut padframes) = (None::<u32>, 0u32, 0u32, 0u32);
     for tok in s.split_whitespace() {
         let (k, v) = tok.split_once(':')?;
         match k {
             "TYPE" => typ = v,
             "SUBTYPE" => subtype = v,
             "FRAMES" => frames = Some(v.parse().ok()?),
+            "PAD" => padframes = v.parse().ok()?,
             "PREGAP" => pregap = v.parse().ok()?,
             "PGTYPE" => pgtype_s = v,
             "PGSUB" => pgsub_s = v,
@@ -813,6 +815,7 @@ fn parse_track_metadata(payload: &[u8]) -> Option<TrackMeta> {
         subtype,
         frames,
         extraframes,
+        padframes,
         pregap,
         postgap,
         pgtype,
@@ -821,28 +824,35 @@ fn parse_track_metadata(payload: &[u8]) -> Option<TrackMeta> {
     })
 }
 
-/// Read all `CHT2`/`CHTR` track records from a CD CHD in stored (track) order.
-fn read_track_metas<F: Read + Seek>(chd: &mut Chd<F>) -> Result<Vec<TrackMeta>> {
+/// Read all CD/GD track records (`CHT2`/`CHTR`/`CHGD`/`CHGT`) from a CHD in stored (track) order,
+/// plus whether they are GD-ROM (`CHGD`/`CHGT`) records.
+fn read_track_metas<F: Read + Seek>(chd: &mut Chd<F>) -> Result<(Vec<TrackMeta>, bool)> {
     let cht2 = crate::make_tag(b"CHT2");
     let chtr = crate::make_tag(b"CHTR");
+    let chgd = crate::make_tag(b"CHGD");
+    let chgt = crate::make_tag(b"CHGT");
     let metas: Vec<Metadata> = chd.metadata_refs().try_into()?;
     let mut out = Vec::new();
+    let mut gdrom = false;
     for m in &metas {
         if m.metatag == cht2 || m.metatag == chtr {
+            out.push(parse_track_metadata(&m.value).ok_or(Error::InvalidData)?);
+        } else if m.metatag == chgd || m.metatag == chgt {
+            gdrom = true;
             out.push(parse_track_metadata(&m.value).ok_or(Error::InvalidData)?);
         }
     }
     if out.is_empty() {
         return Err(Error::UnsupportedFormat);
     }
-    Ok(out)
+    Ok((out, gdrom))
 }
 
 /// List a CD CHD's tracks (chdman's `cdrom_file::parse_metadata`), reading the `CHT2`/`CHTR`
 /// metadata. Takes `&mut Chd` (chd-rs reads metadata through a mutable borrow) rather than
 /// libchdman-rs's `&Chd`.
 pub fn list_tracks<F: Read + Seek>(chd: &mut Chd<F>) -> Result<Vec<TrackInfo>> {
-    let metas = read_track_metas(chd)?;
+    let (metas, _gdrom) = read_track_metas(chd)?;
     Ok(metas
         .iter()
         .enumerate()
@@ -928,7 +938,7 @@ pub fn extract_to_cue(
 ) -> Result<()> {
     let f = BufReader::new(File::open(chd_path).map_err(Error::from)?);
     let mut chd = Chd::open(f, None)?;
-    let tracks = read_track_metas(&mut chd)?;
+    let (tracks, _gdrom) = read_track_metas(&mut chd)?;
 
     let bin_name = bin_path
         .file_name()
@@ -1020,7 +1030,7 @@ impl<F: Read + Seek> CdCookedReader<F> {
     ///
     /// [`open_track`]: CdCookedReader::open_track
     pub fn open(mut chd: Chd<F>) -> Result<Self> {
-        if read_track_metas(&mut chd)?.len() != 1 {
+        if read_track_metas(&mut chd)?.0.len() != 1 {
             return Err(Error::UnsupportedFormat);
         }
         Self::open_track(chd, 0)
@@ -1029,7 +1039,7 @@ impl<F: Read + Seek> CdCookedReader<F> {
     /// Open a specific (0-based) track of a CD CHD as a cooked sector stream. Position 0 is the
     /// start of that track's user data. The track must be `MODE1`/`MODE1_RAW`.
     pub fn open_track(mut chd: Chd<F>, track_index: usize) -> Result<Self> {
-        let metas = read_track_metas(&mut chd)?;
+        let (metas, _gdrom) = read_track_metas(&mut chd)?;
         if track_index >= metas.len() {
             return Err(Error::InvalidParameter);
         }
@@ -1150,6 +1160,118 @@ pub fn extract_to_iso(
         let _ = std::fs::remove_file(iso_path);
     }
     res
+}
+
+/// Extract a CD/GD-ROM CHD to a Sega `.gdi` index plus one split file per track, matching chdman's
+/// `extractcd` GDI output (`MODE_GDI` in `do_extract_cd`), **byte-identical** to it.
+///
+/// Writes `gdi_path` — first line the track count, then one `num lba type datasize "file" 0` line
+/// per track (`type` 4 = data, 0 = audio) — and, alongside it, `<stem>NN.bin` (data) / `<stem>NN.raw`
+/// (audio) per track, where `<stem>` is `gdi_path` with its extension removed and `NN` is the
+/// zero-padded track number (chdman's `%02t` scheme). Audio is byte-swapped to little-endian (the CHD
+/// stores it big-endian), the `padframes` area-gap fill is dropped, and subcode is omitted. On error
+/// the partial outputs are removed.
+pub fn extract_to_gdi(
+    chd_path: &Path,
+    gdi_path: &Path,
+    progress: &mut dyn FnMut(u64),
+) -> Result<()> {
+    let f = BufReader::new(File::open(chd_path).map_err(Error::from)?);
+    let mut chd = Chd::open(f, None)?;
+    let (tracks, _gdrom) = read_track_metas(&mut chd)?;
+
+    let dir = gdi_path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = gdi_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or(Error::InvalidParameter)?
+        .to_string();
+
+    let mut written_files: Vec<PathBuf> = Vec::new();
+    let res = extract_gdi_inner(
+        chd,
+        &tracks,
+        gdi_path,
+        &dir,
+        &stem,
+        &mut written_files,
+        progress,
+    );
+    if res.is_err() {
+        for p in &written_files {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_file(gdi_path);
+    }
+    res
+}
+
+fn extract_gdi_inner<F: Read + Seek>(
+    chd: Chd<F>,
+    tracks: &[TrackMeta],
+    gdi_path: &Path,
+    dir: &Path,
+    stem: &str,
+    written_files: &mut Vec<PathBuf>,
+    progress: &mut dyn FnMut(u64),
+) -> Result<()> {
+    let mut gdi = format!("{}\n", tracks.len());
+    let mut reader = ChdReader::new(chd);
+    let mut frame = vec![0u8; CD_FRAME_SIZE as usize];
+    let mut discoffs = 0u32; // disc LBA (cumulative frames incl. padding) — the track's start
+    let mut chd_frame = 0u64; // logical-image frame offset
+    let mut total = 0u64;
+
+    for (i, t) in tracks.iter().enumerate() {
+        let is_audio = t.trktype == TrackType::Audio;
+        let name = format!(
+            "{stem}{:02}.{}",
+            i + 1,
+            if is_audio { "raw" } else { "bin" }
+        );
+        let q = if name.contains(' ') { "\"" } else { "" };
+        let tracktype = if is_audio { 0 } else { 4 };
+        // GDI line: tracknum LBA type datasize "file" offset(=0, each track its own file)
+        gdi.push_str(&format!(
+            "{} {} {} {} {q}{name}{q} 0\n",
+            i + 1,
+            discoffs,
+            tracktype,
+            t.datasize
+        ));
+
+        let path = dir.join(&name);
+        written_files.push(path.clone());
+        let mut tf = BufWriter::new(File::create(&path).map_err(Error::from)?);
+        let ds = t.datasize as usize;
+        let actual = t.frames.saturating_sub(t.padframes); // splitframes are 0 for our GD-ROMs
+        reader
+            .seek(SeekFrom::Start(chd_frame * CD_FRAME_SIZE as u64))
+            .map_err(Error::from)?;
+        for _ in 0..actual {
+            reader.read_exact(&mut frame).map_err(Error::from)?;
+            if is_audio {
+                let mut k = 0;
+                while k + 1 < ds {
+                    frame.swap(k, k + 1);
+                    k += 2;
+                }
+            }
+            tf.write_all(&frame[..ds]).map_err(Error::from)?;
+            total += ds as u64;
+        }
+        tf.flush().map_err(Error::from)?;
+
+        discoffs += t.frames;
+        chd_frame += (t.frames + t.extraframes) as u64;
+        progress(total);
+    }
+
+    // chdman writes the .gdi index in text mode — CRLF on Windows, LF elsewhere.
+    #[cfg(windows)]
+    let gdi = gdi.replace('\n', "\r\n");
+    std::fs::write(gdi_path, gdi.as_bytes()).map_err(Error::from)?;
+    Ok(())
 }
 
 #[cfg(test)]

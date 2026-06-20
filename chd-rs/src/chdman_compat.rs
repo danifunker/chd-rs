@@ -2091,3 +2091,72 @@ fn createcd_gdi_bit_exact_vs_chdman() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Full **extractcd → `.gdi`** byte-identity (GD-ROM): build a GD-ROM CHD (via `create_from_gdi`),
+/// then extract it to a `.gdi` + split track files with both chdman (`extractcd -o disc.gdi`) and
+/// chd-rs (`cd::extract_to_gdi`); assert the `.gdi` index **and** every per-track file are
+/// byte-identical, and that the data/audio track files round-trip to the originals.
+#[test]
+fn extractcd_gdi_bit_exact_vs_chdman() {
+    use crate::cd::{self, CdCreateOptions};
+
+    let chdman = chdman_path();
+    let base = std::env::temp_dir();
+    let srcdir = base.join("chdrs_egdi_src");
+    let refdir = base.join("chdrs_egdi_ref");
+    let oursdir = base.join("chdrs_egdi_ours");
+    for d in [&srcdir, &refdir, &oursdir] {
+        let _ = std::fs::remove_dir_all(d);
+        std::fs::create_dir_all(d).unwrap();
+    }
+
+    let t1 = build_mode1_bin(90);
+    let t2 = make_audio_input(140 * 2352);
+    let t3 = build_mode1_bin(50);
+    std::fs::write(srcdir.join("t1.bin"), &t1).unwrap();
+    std::fs::write(srcdir.join("t2.raw"), &t2).unwrap();
+    std::fs::write(srcdir.join("t3.bin"), &t3).unwrap();
+    std::fs::write(
+        srcdir.join("disc.gdi"),
+        "3\n1 0 4 2352 \"t1.bin\" 0\n2 100 0 2352 \"t2.raw\" 0\n3 250 4 2352 \"t3.bin\" 0\n",
+    )
+    .unwrap();
+    let chd = srcdir.join("disc.chd");
+    cd::create_from_gdi(
+        &srcdir.join("disc.gdi"),
+        &chd,
+        CdCreateOptions {
+            codecs: [crate::CHD_CODEC_CD_LZMA, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+
+    let s = Command::new(&chdman)
+        .arg("extractcd")
+        .args(["-i".as_ref(), chd.as_os_str()])
+        .args(["-o".as_ref(), refdir.join("disc.gdi").as_os_str()])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(s.success(), "chdman extractcd (gdi) failed");
+
+    cd::extract_to_gdi(&chd, &oursdir.join("disc.gdi"), &mut |_| {}).unwrap();
+
+    // .gdi index + each split track file must match chdman byte-for-byte.
+    for name in ["disc.gdi", "disc01.bin", "disc02.raw", "disc03.bin"] {
+        let r = std::fs::read(refdir.join(name)).unwrap();
+        let o = std::fs::read(oursdir.join(name)).unwrap();
+        assert_eq!(o, r, "extractcd gdi: file {name} differs from chdman");
+    }
+    // round-trip: the data/audio track files reproduce the originals.
+    assert_eq!(std::fs::read(oursdir.join("disc01.bin")).unwrap(), t1);
+    assert_eq!(std::fs::read(oursdir.join("disc02.raw")).unwrap(), t2);
+    assert_eq!(std::fs::read(oursdir.join("disc03.bin")).unwrap(), t3);
+
+    for d in [&srcdir, &refdir, &oursdir] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
