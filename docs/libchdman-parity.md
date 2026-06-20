@@ -36,8 +36,11 @@ and [docs/chdman-mapping.md](../../libchdman-rs/docs/chdman-mapping.md).
 `create_from_gdi`, `extract_to_cue`/`extract_to_iso`/`extract_to_gdi`, `list_tracks`/`TrackInfo`,
 `CdCookedReader`; all byte-identical to `chdman` (all four codecs; `cdfl` glibc-gated).
 
-**Left:** Nero (`.nrg`) input (deferred — unverifiable); `verify`; parent/diff + runtime writes;
-remaining docs. Everything below.
+**Done (cont.):** **Phase F** — parent/diff (`hd::create_raw_from_path_with_parent`, byte-identical
+to `createraw -op`) + the `HdImage` runtime block device (uncompressed in-place / diff over a parent).
+
+**Left:** Nero (`.nrg`) input (deferred — unverifiable); `verify`; rchdman CLI; remaining docs.
+Everything below.
 
 ---
 
@@ -80,13 +83,13 @@ wrapper) · ⬜ to build.
 | `Chd::open(path, writeable, parent)` | `Chd::open(reader, parent)` | 🟡 | takes `Read+Seek`, not a path; **no `writeable`** (reads only). Path helper: `Chd::open(BufReader::new(File::open(p)?), None)`. |
 | `Chd::open_custom(io, …)` | `Chd::open(io, …)` | ✅ | any `Read+Seek` is "custom I/O"; `ChdIo` trait unneeded. |
 | `Chd::create(file, lb, hb, ub, comp)` | `hd::create_*` / `write::write_raw_compressed` | 🟢/⬜ | chd-rs creates via the **format modules**, not a generic `Chd::create`. |
-| `Chd::create_with_parent(…)` | parent/diff (§4 Phase F) | ⬜ | |
+| `Chd::create_with_parent(…)` | `hd::create_raw_from_path_with_parent` / `HdImage::open_with_diff` | ✅ | done (Phase F): compressed child (byte-identical to `createraw -op`) + uncompressed diff. |
 | `version/hunk_bytes/hunk_count/unit_bytes/unit_count/logical_bytes` | `chd.header().{hunk_count,hunk_size,unit_bytes,…}()` | 🟡 | accessor lives on `header()`. Optional: add passthroughs on `Chd`. |
 | `sha1/raw_sha1/parent_sha1` | `chd.header().{sha1,raw_sha1,parent_sha1}()` | 🟡 | same. |
 | `hunk_info(n) -> HunkInfo{compressor,compbytes}` | `chd.map().get_entry(n)` → `MapEntry` | 🟡 | map entry exposes `hunk_type()`+`block_size()`. Optional `HunkInfo` convenience. |
 | `read_hunk(n, buf)` | `chd.hunk(n)?.read_hunk_in(&mut tmp, buf)` | 🟡 | needs a scratch buffer; document. |
 | `read_bytes(off, buf)` | `read::ChdReader` (`Read+Seek`) → `read_exact` | 🟡 | |
-| `write_hunk/write_bytes` | `hd::HdImage` (Phase F) | ⬜ | runtime writes to uncompressed CHDs only. |
+| `write_hunk/write_bytes` | `hd::HdImage::write_sector` | ✅ | done (Phase F): per-sector runtime writes to uncompressed CHDs (in place or into a diff). |
 | `read_metadata(tag, index)` | `chd.metadata()` / `metadata_refs()` filter | 🟡 | optional `Chd::read_metadata(tag,index)` convenience. |
 | `write_metadata/delete_metadata` | `metadata::write_metadata`/`delete_metadata` | ✅ | done & byte-identical (free fns over `Read+Write+Seek`, not methods on `Chd`). chdman edits only uncompressed CHDs; chd-rs also handles compressed. |
 | `clone_all_metadata(src)` | `copy` module (clones all metadata) | ✅ | done inside `copy::copy`. |
@@ -117,7 +120,8 @@ wrapper) · ⬜ to build.
 | `format_gddd(g)` / `read_geometry(chd)` | `hd::format_gddd` / `hd::read_geometry` | ✅ | done; `read_geometry` parses chdman's `createhd` `GDDD`. (Writing GDDD into a new CHD = Phase B.) |
 | `create_from_path/create_from_reader` (createhd) | `hd::create_from_*` (createhd); `hd::create_raw_from_*` (createraw) | ✅ | both done & byte-identical (multi-codec, `progress`/`cancel`). `create_from_*` writes GDDD (+ optional IDNT) + the metadata-inclusive overall SHA-1. |
 | `extract_to_path/extract_to_writer` | `hd::extract_to_path` / `hd::extract_to_writer` | ✅ | done; streams logical bytes via the existing decoder (truncates last-hunk padding). |
-| `HdImage` (+`open`/`open_with_diff`/`reopen_diff`/`read_sector`/`write_sector`/`as_chd*`) | new (Phase F) | ⬜ | runtime block device; uncompressed writes + diff/parent. |
+| `HdImage` (+`open`/`open_with_diff`/`reopen_diff`/`read_sector`/`write_sector`) | `hd::HdImage` | ✅ | done; uncompressed in-place + diff/parent runtime writes. Holds the diff as a raw R/W file + in-memory map (chd-rs's `Chd` is read-only); chdman `extracthd -ip` reads our diff. |
+| `Chd::create_with_parent` (compressed child) | `hd::create_raw_from_path_with_parent` | ✅ | done & **byte-identical to `chdman createraw -op`** — `COMPRESSION_PARENT` refs via the sliding-window parent hash map + `parent_sha1` link. |
 
 ### 3.4 `cd` module (createcd/extractcd)
 
@@ -188,9 +192,11 @@ Ordered by dependency; maps onto PARITY_PLAN M3–M8.
   no equivalent command, e.g. CD→iso). Only **Nero (`.nrg`)** input is deferred — a binary TOC with
   no way to generate a fixture (chdman can't write `.nrg`), so it can't be verified to the
   byte-identity bar.
-- **Phase F — parent/diff + `HdImage`.** Uncompressed diff children vs a compressed parent
-  (parent-hunk dedup lights up here — the driver hook exists), runtime `read_sector`/`write_sector`,
-  `write_hunk`/`write_bytes` equivalents.
+- **Phase F — parent/diff + `HdImage`. ✅ DONE.** Compressed child vs a compressed parent
+  (`hd::create_raw_from_path_with_parent`, `COMPRESSION_PARENT` refs via the sliding-window parent
+  hash map, **byte-identical to `chdman createraw -op`**) + the `HdImage` runtime block device
+  (uncompressed in-place or a diff over a compressed parent; `read_sector`/`write_sector`; verified
+  round-trip and chdman-readable).
 - **Phase G — `Chd::info`/`verify`, `ChdInfo`, rchdman, docs.** Lift verify from rchdman; add
   `ChdInfo`; extend rchdman with `create*`/`copy`/`addmeta`/`delmeta`; port libchdman-rs's
   `format-modules.md` + `chdman-mapping.md`; README rewrite.

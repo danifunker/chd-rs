@@ -28,7 +28,7 @@ GDDD/IDNT). C: **`copy`** + **`write_metadata`/`delete_metadata`** on existing C
 G (`info`/`verify`, rchdman).
 
 **Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target). See
-"Verification gates" below. **62 write/compat/unit tests green** (+2 `#[ignore]`d glibc-chdman FLAC
+"Verification gates" below. **65 write/compat/unit tests green** (+2 `#[ignore]`d glibc-chdman FLAC
 dump checks; the 5 failing `read_*` tests are pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`) and **verified green on GitHub Actions** (all 4 jobs:
 lint + test on ubuntu/windows/macos): clones the sibling codec crates at their tags (they're public),
 then `cargo build -p chd` + `cargo test -p chd --features write-zstd -- --skip tests::read` + fmt.
@@ -211,10 +211,18 @@ decision (may become a new crate).
 - [ ] Nero (`.nrg`) TOC parser — **deferred**: binary format, no way to generate a fixture (chdman
       can't write `.nrg`), so it can't be verified to the byte-identity bar. Documented gap.
 
-## M7 — Parent/diff + `HdImage`
+## M7 — Parent/diff + `HdImage` ✅
 
-- [ ] Uncompressed diff children vs compressed parent; parent SHA-1 linkage
-- [ ] `HdImage` block device: `read_sector`/`write_sector`, `open_with_diff`/`reopen_diff`
+- [x] **Compressed child vs parent** ✅ — `hd::create_raw_from_path_with_parent` (chdman
+      `createraw -op`): `write::build_parent_ref` (port of `async_walk_parent` + the `compress_continue`
+      hashmap — sliding `hunk_bytes` windows at every unit offset, last hunk → 1 window, first wins) +
+      `write_raw_inner` parent hook (SELF then PARENT priority; emits `COMPRESSION_PARENT(unit)`;
+      `parent_sha1` header link). **Byte-identical to chdman** (16-hunk child, 13 parent refs).
+- [x] **`HdImage` block device** ✅ — `open` (uncompressed in-place), `open_with_diff`/`reopen_diff`
+      (uncompressed diff over a compressed parent: unwritten hunks fall through, writes materialise
+      the hunk + rewrite its 4-byte map entry), `read_sector`/`write_sector`/`sector_count`/`geometry`.
+      `write::write_empty_diff` builds the initial diff. Round-trip verified **and chdman
+      `extracthd -ip` reads our diff** (chdman-compatible format).
 
 ## M8 — rchdman + docs
 
@@ -267,13 +275,28 @@ Tracked in detail in [docs/libchdman-parity.md](docs/libchdman-parity.md). Phase
   writing GDDD (+ optional IDNT), byte-identical to chdman.
 - [x] **C** — `copy` ✅ + `write_metadata`/`delete_metadata` on existing CHDs ✅ — all byte-identical.
 - [x] **D** — `dvd` ✅ — `createdvd`/`extractdvd` byte-identical (`DVD ` record, 2048 sectors).
-- [~] **E** — `cd`: CD codec encoders (cdzl/cdlz/cdzs) ✅ **and `createcd` (CUE/ISO parser + CHT2 +
-  `create_from_cue`/`create_from_iso`) byte-identical** ✅; remaining = `extractcd`, GDI/Nero,
-  `list_tracks`, `CdCookedReader`, `cdfl`. · [ ] **F** — parent/diff + `HdImage` ·
-  [~] **G** — `Chd::info` ✅ + `ChdInfo`; `verify` (needs a read-side SHA-1 dep) + rchdman + docs.
+- [x] **E** — `cd` ✅ — createcd (CUE/ISO/GDI) + extractcd (cue/bin/gdi) + `extract_to_iso` +
+  `CdCookedReader` + `list_tracks`, all byte-identical (or round-trip where chdman has no command);
+  all four codecs incl. glibc-verified `cdfl`. Only Nero (`.nrg`) deferred (unverifiable).
+- [x] **F** — parent/diff + `HdImage` ✅ — `create_raw_from_path_with_parent` (compressed child,
+  byte-identical to `createraw -op`) + `HdImage` (uncompressed diff + sector R/W; chdman reads it).
+- [~] **G** — `Chd::info` ✅ + `ChdInfo`; `verify` (needs a read-side SHA-1 dep) + rchdman + docs.
 
 ## Session log
 
+- 2026-06-20: **Phase F COMPLETE — parent/diff + `HdImage`.** (1) **`HdImage`** (`hd.rs`): a
+  read/write block-device view over an uncompressed HD CHD. `open` (in-place), `open_with_diff`/
+  `reopen_diff` (uncompressed **diff** over a compressed parent — unwritten hunks fall through to the
+  parent, writes materialise the hunk into the diff and rewrite its 4-byte map entry), `read_sector`/
+  `write_sector`/`sector_count`/`geometry`. chd-rs's `Chd` is read-only, so `HdImage` holds the diff
+  as a raw R/W `File` + an in-memory map and keeps the parent open as a read-only `Chd`. New
+  `write::write_empty_diff` builds the initial diff (header + all-zero map + cloned metadata). Verified
+  round-trip **and chdman `extracthd -ip` reads our diff**. (2) **Compressed child** (`createraw -op`):
+  `write::build_parent_ref` (port of `async_walk_parent` + `compress_continue` hashmap — sliding
+  `hunk_bytes` windows at every unit offset, 1 window for the last hunk, first wins) + a parent hook in
+  `write_raw_inner` (SELF-then-PARENT priority, emits `COMPRESSION_PARENT(unit)`, `parent_sha1` link).
+  `hd::create_raw_from_path_with_parent` **byte-identical to `chdman createraw -op`** (16-hunk child,
+  13 parent refs). 65 lib/compat tests green (+3). Next: G (`verify` + rchdman + docs).
 - 2026-06-20: **CD niche formats — GDI (both ways), `extract_to_iso`, `CdCookedReader`.** (1)
   **`CdCookedReader`** (`Read+Seek` over a MODE1 track's cooked 2048-byte user data; sync/ECC stripped
   at offset 16 for raw, 0 for cooked) + **`extract_to_iso`** (single MODE1 → raw iso) — round-trip
