@@ -797,6 +797,128 @@ fn copy_hd_lzma_to_zlib_bit_exact_vs_chdman() {
     assert_copy_bit_exact("lzma", "zlib", [crate::CHD_CODEC_ZLIB, 0, 0, 0]);
 }
 
+/// Full **createdvd** byte-identity: chd-rs `dvd::create_from_iso` (writing the `DVD ` record) must
+/// equal `chdman createdvd -c <mnemonic>` byte-for-byte — exercising the 2048-unit DVD layout, the
+/// 1-NUL `DVD ` metadata record, and (compressed) the metadata-inclusive overall SHA-1.
+fn assert_createdvd_bit_exact(mnemonic: &str, codecs: [u32; 4]) {
+    use crate::dvd::{self, DvdCreateOptions};
+
+    let chdman = chdman_path();
+    let dir = std::env::temp_dir();
+    let in_path = dir.join(format!("chdrs_createdvd_in_{mnemonic}.iso"));
+    let ours_path = dir.join(format!("chdrs_createdvd_ours_{mnemonic}.chd"));
+    let ref_path = dir.join(format!("chdrs_createdvd_ref_{mnemonic}.chd"));
+
+    // 256 KiB = 128 × 2048-byte sectors.
+    let input = make_input(256 * 1024);
+    File::create(&in_path).unwrap().write_all(&input).unwrap();
+
+    let status = Command::new(&chdman)
+        .arg("createdvd")
+        .arg("-i")
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&ref_path)
+        .args(["-c", mnemonic])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(status.success(), "chdman createdvd -c {mnemonic} failed");
+    let reference = std::fs::read(&ref_path).unwrap();
+
+    let opts = DvdCreateOptions {
+        codecs,
+        ..Default::default()
+    };
+    dvd::create_from_iso(&in_path, &ours_path, opts, &mut |_p| {}, &|| false).unwrap();
+    let ours = std::fs::read(&ours_path).unwrap();
+
+    assert_eq!(
+        ours.len(),
+        reference.len(),
+        "createdvd -c {mnemonic} size differs: ours={}, chdman={}",
+        ours.len(),
+        reference.len()
+    );
+    assert_eq!(
+        ours, reference,
+        "createdvd -c {mnemonic} bytes differ from chdman"
+    );
+
+    let _ = std::fs::remove_file(&in_path);
+    let _ = std::fs::remove_file(&ours_path);
+    let _ = std::fs::remove_file(&ref_path);
+}
+
+#[test]
+fn createdvd_none_bit_exact_vs_chdman() {
+    assert_createdvd_bit_exact("none", [0, 0, 0, 0]);
+}
+
+#[test]
+fn createdvd_zlib_bit_exact_vs_chdman() {
+    assert_createdvd_bit_exact("zlib", [crate::CHD_CODEC_ZLIB, 0, 0, 0]);
+}
+
+#[test]
+fn createdvd_lzma_bit_exact_vs_chdman() {
+    assert_createdvd_bit_exact("lzma", [crate::CHD_CODEC_LZMA, 0, 0, 0]);
+}
+
+/// `dvd::extract_to_iso` round-trips the logical image (partial last hunk) and rejects a non-DVD
+/// CHD with `UnsupportedFormat`.
+#[test]
+fn dvd_extract_roundtrips_and_rejects_non_dvd() {
+    use crate::dvd::{self, DvdCreateOptions};
+
+    let dir = std::env::temp_dir();
+    let in_path = dir.join("chdrs_dvd_rt_in.iso");
+    let chd_path = dir.join("chdrs_dvd_rt.chd");
+    let out_path = dir.join("chdrs_dvd_rt_out.iso");
+    let raw_path = dir.join("chdrs_dvd_rt_raw.chd");
+
+    let input = make_input(2048 * 53); // 2048-aligned, partial last 4096 hunk
+    File::create(&in_path).unwrap().write_all(&input).unwrap();
+
+    dvd::create_from_iso(
+        &in_path,
+        &chd_path,
+        DvdCreateOptions {
+            codecs: [crate::CHD_CODEC_LZMA, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+
+    let mut total = 0u64;
+    dvd::extract_to_iso(&chd_path, &out_path, &mut |d| total = d).unwrap();
+    assert_eq!(
+        std::fs::read(&out_path).unwrap(),
+        input,
+        "dvd round-trip mismatch"
+    );
+    assert_eq!(total, input.len() as u64);
+
+    // a raw (non-DVD) CHD must be rejected by dvd::extract
+    let mut cur = std::io::Cursor::new(Vec::new());
+    crate::write::write_raw_compressed(&mut cur, &input, 4096, 2048, CodecType::LzmaV5).unwrap();
+    std::fs::write(&raw_path, cur.into_inner()).unwrap();
+    assert!(
+        matches!(
+            dvd::extract_to_iso(&raw_path, &out_path, &mut |_d| {}),
+            Err(crate::Error::UnsupportedFormat)
+        ),
+        "dvd::extract should reject a non-DVD CHD"
+    );
+
+    let _ = std::fs::remove_file(&in_path);
+    let _ = std::fs::remove_file(&chd_path);
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&raw_path);
+}
+
 /// Build `pattern_ids.len()` hunks; hunks sharing a pattern id are byte-identical (forcing
 /// `COMPRESSION_SELF` refs). Pattern 0 is all-zeros; others are a distinct compressible sawtooth.
 fn build_hunks(hunk_size: usize, pattern_ids: &[u8]) -> Vec<u8> {

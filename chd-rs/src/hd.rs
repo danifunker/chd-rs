@@ -16,7 +16,6 @@
 //! functions (not methods on an owned, writeable handle). See `docs/libchdman-differences.md`.
 
 use crate::error::{Error, Result};
-use crate::header::CodecType;
 use crate::metadata::Metadata;
 use crate::read::ChdReader;
 use crate::{write, Chd, CompressionProgress};
@@ -201,9 +200,9 @@ pub fn create_raw_from_reader<R: Read, W: Write + Seek>(
     if opts.geometry.is_some() || opts.ident.is_some() {
         return Err(Error::UnsupportedFormat);
     }
-    let data = read_and_pad(reader, opts.logical_size, opts.unit_size, opts.hunk_size)?;
+    let data = write::read_and_pad(reader, opts.logical_size, opts.unit_size, opts.hunk_size)?;
     let codecs = write::resolve_codecs(&opts.codecs)?;
-    write_create(
+    write::write_create(
         out,
         &data,
         opts.hunk_size,
@@ -242,7 +241,7 @@ pub fn create_from_reader<R: Read, W: Write + Seek>(
     progress: &mut dyn FnMut(CompressionProgress),
     cancel: &dyn Fn() -> bool,
 ) -> Result<()> {
-    let data = read_and_pad(reader, opts.logical_size, opts.unit_size, opts.hunk_size)?;
+    let data = write::read_and_pad(reader, opts.logical_size, opts.unit_size, opts.hunk_size)?;
     let logical = data.len() as u64;
 
     // geometry: explicit, else derived from the logical size + sector (unit) size.
@@ -267,7 +266,7 @@ pub fn create_from_reader<R: Read, W: Write + Seek>(
     }
 
     let codecs = write::resolve_codecs(&opts.codecs)?;
-    write_create(
+    write::write_create(
         out,
         &data,
         opts.hunk_size,
@@ -319,74 +318,6 @@ fn create_from_path_impl(
         let _ = std::fs::remove_file(out_path);
     }
     res
-}
-
-/// Read all of `reader` into memory and zero-pad to `logical_size` (or the read length if 0).
-/// Validates `hunk_size`/`unit_size` and that the logical size is unit-aligned and ≥ the input.
-fn read_and_pad<R: Read>(
-    mut reader: R,
-    logical_size: u64,
-    unit_size: u32,
-    hunk_size: u32,
-) -> Result<Vec<u8>> {
-    if unit_size == 0 || hunk_size == 0 || hunk_size % unit_size != 0 {
-        return Err(Error::InvalidParameter);
-    }
-    let mut data = Vec::new();
-    reader.read_to_end(&mut data).map_err(Error::from)?;
-    let logical = if logical_size != 0 {
-        logical_size
-    } else {
-        data.len() as u64
-    };
-    if logical % u64::from(unit_size) != 0 || data.len() as u64 > logical {
-        return Err(Error::InvalidParameter);
-    }
-    data.resize(logical as usize, 0);
-    Ok(data)
-}
-
-/// Write `data` (already padded to the logical size) to `out` with the given codec list and
-/// metadata, dispatching to the uncompressed or compressed writer and adapting `progress`/`cancel`.
-fn write_create<W: Write + Seek>(
-    out: &mut W,
-    data: &[u8],
-    hunk_size: u32,
-    unit_size: u32,
-    codecs: &[CodecType],
-    metadata: &[write::MetaEntry],
-    progress: &mut dyn FnMut(CompressionProgress),
-    cancel: &dyn Fn() -> bool,
-) -> Result<()> {
-    let logical = data.len() as u64;
-    if codecs.is_empty() {
-        // all-zero codec list → uncompressed (no per-hunk progress hook).
-        if cancel() {
-            return Err(Error::Cancelled);
-        }
-        write::write_uncompressed_inner(out, data, hunk_size, unit_size, metadata)?;
-        progress(CompressionProgress {
-            bytes_done: logical,
-            bytes_total: logical,
-            ratio: 1.0,
-        });
-        return Ok(());
-    }
-
-    let mut prog = |done: u64, total: u64, comp: u64| {
-        progress(CompressionProgress {
-            bytes_done: done,
-            bytes_total: total,
-            ratio: if done == 0 {
-                1.0
-            } else {
-                comp as f64 / done as f64
-            },
-        });
-    };
-    write::write_raw_inner(
-        out, data, hunk_size, unit_size, codecs, metadata, &mut prog, cancel,
-    )
 }
 
 /// Stream the logical contents of the CHD at `chd_path` to `writer` (chdman `extractraw` /

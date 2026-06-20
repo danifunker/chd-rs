@@ -86,31 +86,7 @@ fn copy_inner(
         .collect();
 
     let mut out = File::create(dest).map_err(Error::from)?;
-    if codecs.is_empty() {
-        if cancel() {
-            return Err(Error::Cancelled);
-        }
-        write::write_uncompressed_inner(&mut out, &data, hunk, unit, &entries)?;
-        progress(CompressionProgress {
-            bytes_done: logical,
-            bytes_total: logical,
-            ratio: 1.0,
-        });
-        return Ok(());
-    }
-
-    let mut prog = |done: u64, total: u64, comp: u64| {
-        progress(CompressionProgress {
-            bytes_done: done,
-            bytes_total: total,
-            ratio: if done == 0 {
-                1.0
-            } else {
-                comp as f64 / done as f64
-            },
-        });
-    };
-    write::write_raw_inner(
-        &mut out, &data, hunk, unit, &codecs, &entries, &mut prog, cancel,
+    write::write_create(
+        &mut out, &data, hunk, unit, &codecs, &entries, progress, cancel,
     )
 }

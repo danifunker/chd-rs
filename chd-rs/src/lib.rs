@@ -202,6 +202,12 @@ pub mod hd;
 #[cfg_attr(docsrs, doc(cfg(feature = "write")))]
 pub mod copy;
 
+/// DVD CHD creation/extraction (chdman `createdvd`/`extractdvd`). Available with the `write`
+/// feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod dvd;
+
 #[cfg(feature = "unstable_lending_iterators")]
 #[cfg_attr(docsrs, doc(cfg(unstable_lending_iterators)))]
 pub mod iter;
