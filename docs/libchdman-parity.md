@@ -84,8 +84,8 @@ wrapper) · ⬜ to build.
 | `read_bytes(off, buf)` | `read::ChdReader` (`Read+Seek`) → `read_exact` | 🟡 | |
 | `write_hunk/write_bytes` | `hd::HdImage` (Phase F) | ⬜ | runtime writes to uncompressed CHDs only. |
 | `read_metadata(tag, index)` | `chd.metadata()` / `metadata_refs()` filter | 🟡 | optional `Chd::read_metadata(tag,index)` convenience. |
-| `write_metadata/delete_metadata` | metadata writer (Phase C) | ⬜ | |
-| `clone_all_metadata(src)` | `copy` module (Phase C) | ⬜ | |
+| `write_metadata/delete_metadata` | `metadata::write_metadata`/`delete_metadata` | ✅ | done & byte-identical (free fns over `Read+Write+Seek`, not methods on `Chd`). chdman edits only uncompressed CHDs; chd-rs also handles compressed. |
+| `clone_all_metadata(src)` | `copy` module (clones all metadata) | ✅ | done inside `copy::copy`. |
 | `info() -> ChdInfo` | new `ChdInfo` + `Chd::info()` | ⬜ | aggregate header + track count + `is_hd/cd/gd/dvd/av`. |
 | `verify()` | new `Chd::verify()` | ⬜ | rchdman already has the logic — lift into the lib. |
 | `make_tag(a,b,c,d)` | `make_tag(&[u8;4])` (private) | 🟡 | expose (note signature difference) or add a 4-arg form. |
@@ -167,12 +167,11 @@ Ordered by dependency; maps onto PARITY_PLAN M3–M8.
   into both writers, and `hd::create_from_*` writing GDDD (+ optional IDNT). Verified byte-identical
   to `chdman createhd` (`-c none`/`zlib`/`lzma`, GDDD+IDNT). The new-file metadata writer is the
   foundation for Phase C's write/delete-on-existing + `copy`.
-- **Phase C — metadata write/delete + `copy`.** `copy` ✅ DONE (`copy::copy`, byte-identical:
-  recompress + clone metadata via the new-file writer). The new-file metadata **writer**
-  (`build_metadata_blob`) landed in Phase B. Remaining: `write_metadata`/`delete_metadata` on
-  **existing** CHDs (splice the on-disk linked list: overwrite-in-place when the new payload fits,
-  else unlink + append; update the previous entry's `next` / the header `meta_offset`) — verify
-  `addmeta`/`delmeta` byte-identity.
+- **Phase C — metadata write/delete + `copy`. ✅ DONE.** `copy::copy` (recompress + clone metadata)
+  and `metadata::write_metadata`/`delete_metadata` (in-place edit of an existing CHD's linked list:
+  overwrite-in-place-or-append + relink + overall-SHA-1 update) are both byte-identical to chdman
+  (`copy`/`addmeta`/`delmeta`). Note: chdman only edits *uncompressed* CHDs; chd-rs's free functions
+  additionally handle compressed CHDs correctly.
 - **Phase D — `dvd` module. ✅ DONE.** Flat 2048 sectors + the empty `DVD ` record (1-NUL payload),
   reusing the createhd metadata writer. `createdvd` verified byte-identical (`-c none/zlib/lzma`).
 - **Phase E — `cd` module.** Pure-Rust TOC parser, CD encoders (sector/subcode split + ECC via

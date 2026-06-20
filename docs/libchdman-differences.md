@@ -137,6 +137,24 @@ Same shape as libchdman-rs's `dvd` module; byte-identical to `chdman createdvd`.
 sectors + the empty `DVD ` metadata record. `extract_*` rejects non-DVD CHDs with
 `Error::UnsupportedFormat`.
 
+### Editing metadata on an existing CHD (`addmeta` / `delmeta`)
+
+libchdman-rs has `chd.write_metadata(...)` / `chd.delete_metadata(...)` on an owned writeable
+handle. chd-rs exposes them as **free functions over a `Read + Write + Seek` handle** (no owned
+mutable `Chd`):
+
+```rust
+use chd::metadata::{write_metadata, delete_metadata, METADATA_FLAG_CHECKSUM};
+let mut f = std::fs::OpenOptions::new().read(true).write(true).open(chd_path)?;
+write_metadata(&mut f, chd::CHD_CODEC_NONE /* any u32 tag */, 0, b"value\0", METADATA_FLAG_CHECKSUM)?;
+delete_metadata(&mut f, some_tag, 0)?;
+```
+
+Byte-identical to `chdman addmeta`/`delmeta`. Note: chdman only edits **uncompressed** CHDs (MAME
+refuses a writeable open of a compressed one); chd-rs's functions also handle compressed CHDs
+correctly (append + recompute the overall SHA-1). chdman's text form stores a trailing NUL — pass
+it in `data` if you're matching `--valuetext`.
+
 ---
 
 ## 3. Progress & cancellation (replaces `ChdCompressor`/`ChdDataHandler`/`CompressStep`)
@@ -178,7 +196,9 @@ appended after `Error::Unknown` so the existing libchdr-ABI discriminants are un
 | `ChdCompressor` / `ChdDataHandler` / `CompressStep` | synchronous create fns + `progress`/`cancel` |
 | `Chd::create` / `Chd::create_with_parent` | `hd::create_*` / `hd::create_raw_*` (parent/diff in a later phase) |
 | `copy::copy` / `CopyOptions` | `copy::copy` / `copy::CopyOptions` (same shape) |
-| `Chd::write_hunk` / `write_bytes` / `write_metadata` | runtime writes via a future `HdImage`; metadata writer in a later phase |
+| `Chd::write_metadata` / `delete_metadata` | `metadata::write_metadata` / `delete_metadata` (free fns over a `Read+Write+Seek` handle) |
+| `Chd::write_hunk` / `write_bytes` | runtime writes via a future `HdImage` |
+| `Chd::clone_all_metadata` | done inside `copy::copy` |
 | `Chd::info()` / `verify()` / `ChdInfo` | Phase G |
 | `make_tag(a,b,c,d)` (4-arg) | crate-internal `make_tag(&[u8;4])` |
 

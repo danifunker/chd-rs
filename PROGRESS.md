@@ -17,16 +17,17 @@ compressed (now **multi-codec**: zlib/huff/lzma/zstd + **flac**), **self-hunk de
 `compress_v5_map`, and SHA-1, all verified end-to-end. All five bit-exact codec encoders are wired
 (flac via `libflac-rs`, round-trip-verified through chdman; byte-identity is libm-gated — see below).
 
-**Now:** **Phases A, B, C-`copy`, and D are done.** A: `codec` module, `flac` encoder, multi-codec
+**Now:** **Phases A, B, C, and D are done.** A: `codec` module, `flac` encoder, multi-codec
 `write_raw`, `CompressionProgress` + `progress`/`cancel`, public `hd` createraw + extract + geometry.
-B: full **`createhd`** (metadata writer + overall SHA-1 + GDDD/IDNT). C: **`copy`** (recompress +
-clone metadata). D: **`dvd`** (`createdvd`/`extractdvd`, `DVD ` record). All byte-identical to
-chdman 0.288. Remaining: C's `write_metadata`/`delete_metadata` on *existing* CHDs; then E (`cd`),
-F (parent/diff + `HdImage`), G (`info`/`verify`, rchdman).
+B: full **`createhd`** (metadata writer + overall SHA-1 + GDDD/IDNT). C: **`copy`** +
+**`write_metadata`/`delete_metadata`** on existing CHDs. D: **`dvd`** (`createdvd`/`extractdvd`).
+All byte-identical to chdman 0.288. Remaining: **E (`cd`)** — the big one (TOC parser, CD codecs,
+ECC, CHT2); then F (parent/diff + `HdImage`), G (`info`/`verify`, rchdman).
 
 **Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target). See
-"Verification gates" below. **40 write/compat tests green** (the 5 failing `read_*` tests are
-pre-existing missing-fixture cases, unrelated to write).
+"Verification gates" below. **42 write/compat tests green** (the 5 failing `read_*` tests are
+pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`):
+clones the sibling codec crates at their tags, then builds/tests on ubuntu/windows/macos + fmt.
 
 **CI:** chd-rs has **no CI** (siblings do). Blocked: the `write` feature's optional **path deps** on
 the sibling crates (`../../lzma-sdk-rs`, …) make even the default build's dependency resolution fail
@@ -146,8 +147,11 @@ decision (may become a new crate).
       Verified via createhd byte-identity. Layout learned: compressed = header→meta→hunks→map
       (`meta_offset=124`); uncompressed = header→map→meta→pad→data (`meta_offset=124+mapsize`,
       SHA-1 zero).
-- [ ] `write_metadata` / `delete_metadata` on **existing** CHDs (splice into the on-disk linked
-      list) — Phase C.
+- [x] `write_metadata` / `delete_metadata` on **existing** CHDs ✅ (`metadata.rs`, gated `write`) —
+      free fns over `Read+Write+Seek`; overwrite-in-place-or-append + relink + overall-SHA-1 update
+      (compressed only). Byte-identical to `chdman addmeta`/`delmeta` (which only edit *uncompressed*
+      CHDs — MAME refuses a writeable open of a compressed one; chd-rs additionally handles
+      compressed correctly). Ports `metadata_find`/`metadata_set_previous_next`/`metadata_update_hash`.
 - [x] `CopyOptions` + `copy` ✅ (`copy.rs`) — recompress source logical bytes (preserve
       unit_bytes; default hunk = source's), clone all metadata in source order with flags. Byte-
       identical to `chdman copy`.
@@ -225,14 +229,25 @@ Tracked in detail in [docs/libchdman-parity.md](docs/libchdman-parity.md). Phase
   hd item carried into B, since it needs the metadata writer.)
 - [x] **B** — `hd` createhd ✅ — metadata writer (new files) + overall SHA-1 + `create_from_*`
   writing GDDD (+ optional IDNT), byte-identical to chdman.
-- [~] **C** — `copy` ✅ (`copy::copy`, byte-identical). Remaining: `write_metadata`/`delete_metadata`
-  on *existing* CHDs (splice the on-disk linked list).
+- [x] **C** — `copy` ✅ + `write_metadata`/`delete_metadata` on existing CHDs ✅ — all byte-identical.
 - [x] **D** — `dvd` ✅ — `createdvd`/`extractdvd` byte-identical (`DVD ` record, 2048 sectors).
 - [ ] **E** — `cd` · [ ] **F** — parent/diff + `HdImage` · [ ] **G** — `Chd::info`/`verify`,
   rchdman, remaining docs.
 
 ## Session log
 
+- 2026-06-20: **Phase C completed (metadata write/delete) + CI added.** (1) `metadata::write_metadata`
+  /`delete_metadata` for existing V5 CHDs (`Read+Write+Seek` free fns): ports of
+  `metadata_find`/`metadata_set_previous_next`/`metadata_update_hash` — overwrite-in-place-or-append
+  + relink, overall-SHA-1 recompute on write (compressed only). **Byte-identical to `chdman
+  addmeta`/`delmeta`.** Learned chdman only edits *uncompressed* CHDs (MAME refuses a writeable open
+  of a compressed one → "File not writeable"); chd-rs's fns also handle compressed correctly. (2)
+  **CI** (`.github/workflows/ci.yml`, user chose the "clone siblings" approach): clones the four
+  sibling codec crates at their tags into the checkout's parent (so `../../<crate>` path deps
+  resolve), then `cargo build -p chd` + `cargo test -p chd --features write-zstd -- --skip
+  tests::read` on ubuntu/windows/macos, plus a `cargo fmt -p chd --check` lint job. (The 3
+  crate-level doctests were already fixed; clippy isn't `-D warnings` yet — legacy lints.) 42
+  write/compat tests green.
 - 2026-06-20: **Phase D `dvd` landed — byte-identical to `chdman createdvd`.** New `dvd` module
   (`DvdCreateOptions`, `create_from_reader`/`create_from_iso`, `extract_to_writer`/`extract_to_iso`,
   `DVD_SECTOR_SIZE`/`DEFAULT_HUNK_SIZE`). It's createhd with a `DVD ` record (1-NUL payload — chdman
