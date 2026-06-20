@@ -1785,3 +1785,145 @@ fn createcd_iso_cdlz_bit_exact_vs_chdman() {
     let _ = std::fs::remove_file(&ours_path);
     let _ = std::fs::remove_file(&ref_path);
 }
+
+/// **extractcd** byte-identity: build a CD CHD (chdman `createcd`), extract it with both chdman
+/// (`extractcd -o out.cue -ob out.bin`) and chd-rs (`cd::extract_to_cue`), and assert the emitted
+/// CUE **and** BIN are byte-identical — plus that the extracted BIN equals the original source BIN
+/// (full create→extract round-trip). `ref`/`ours` go in sibling dirs so the cue's `FILE "out.bin"`
+/// line matches.
+fn assert_extractcd_bit_exact(name: &str, src_bin: &[u8], cue_text: &str) {
+    let chdman = chdman_path();
+    let base = std::env::temp_dir();
+    let srcdir = base.join(format!("chdrs_ecd_src_{name}"));
+    let refdir = base.join(format!("chdrs_ecd_ref_{name}"));
+    let oursdir = base.join(format!("chdrs_ecd_ours_{name}"));
+    for d in [&srcdir, &refdir, &oursdir] {
+        let _ = std::fs::remove_dir_all(d);
+        std::fs::create_dir_all(d).unwrap();
+    }
+
+    std::fs::write(srcdir.join("src.bin"), src_bin).unwrap();
+    std::fs::write(srcdir.join("src.cue"), cue_text.as_bytes()).unwrap();
+    let src_chd = srcdir.join("src.chd");
+
+    let s = Command::new(&chdman)
+        .arg("createcd")
+        .args(["-i".as_ref(), srcdir.join("src.cue").as_os_str()])
+        .args(["-o".as_ref(), src_chd.as_os_str()])
+        .args(["-c", "cdlz"])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(s.success(), "createcd ({name}) failed");
+
+    let s = Command::new(&chdman)
+        .arg("extractcd")
+        .args(["-i".as_ref(), src_chd.as_os_str()])
+        .args(["-o".as_ref(), refdir.join("out.cue").as_os_str()])
+        .args(["-ob".as_ref(), refdir.join("out.bin").as_os_str()])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(s.success(), "extractcd ({name}) failed");
+
+    crate::cd::extract_to_cue(
+        &src_chd,
+        &oursdir.join("out.cue"),
+        &oursdir.join("out.bin"),
+        &mut |_| {},
+    )
+    .unwrap();
+
+    let ref_cue = std::fs::read(refdir.join("out.cue")).unwrap();
+    let ours_cue = std::fs::read(oursdir.join("out.cue")).unwrap();
+    assert_eq!(
+        ours_cue,
+        ref_cue,
+        "extractcd cue differs from chdman ({name})\n--- ours ---\n{}\n--- chdman ---\n{}",
+        String::from_utf8_lossy(&ours_cue),
+        String::from_utf8_lossy(&ref_cue),
+    );
+
+    let ref_bin = std::fs::read(refdir.join("out.bin")).unwrap();
+    let ours_bin = std::fs::read(oursdir.join("out.bin")).unwrap();
+    assert_eq!(
+        ours_bin.len(),
+        ref_bin.len(),
+        "extractcd bin size differs ({name}): ours={}, chdman={}",
+        ours_bin.len(),
+        ref_bin.len()
+    );
+    assert_eq!(
+        ours_bin, ref_bin,
+        "extractcd bin differs from chdman ({name})"
+    );
+    assert_eq!(ours_bin, src_bin, "extractcd bin != source bin ({name})");
+
+    for d in [&srcdir, &refdir, &oursdir] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+#[test]
+fn extractcd_single_mode1_bit_exact_vs_chdman() {
+    let bin = build_mode1_bin(50);
+    let cue = "FILE \"src.bin\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n";
+    assert_extractcd_bit_exact("mode1", &bin, cue);
+}
+
+#[test]
+fn extractcd_multitrack_bit_exact_vs_chdman() {
+    let mut bin = build_mode1_bin(50);
+    bin.extend_from_slice(&make_audio_input(30 * 2352));
+    let cue = "FILE \"src.bin\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n  \
+               TRACK 02 AUDIO\n    INDEX 00 00:00:50\n    INDEX 01 00:00:53\n";
+    assert_extractcd_bit_exact("multi", &bin, cue);
+}
+
+/// `list_tracks` reads back the `CHT2` records: the multi-track CD's two tracks with the right
+/// types, frame counts, and the audio track's in-file pregap.
+#[test]
+fn list_tracks_reads_cht2() {
+    use crate::cd::{SubcodeType, TrackType};
+
+    let dir = std::env::temp_dir();
+    let srcdir = dir.join("chdrs_listtracks");
+    let _ = std::fs::remove_dir_all(&srcdir);
+    std::fs::create_dir_all(&srcdir).unwrap();
+    let mut bin = build_mode1_bin(50);
+    bin.extend_from_slice(&make_audio_input(30 * 2352));
+    std::fs::write(srcdir.join("src.bin"), &bin).unwrap();
+    std::fs::write(
+        srcdir.join("src.cue"),
+        "FILE \"src.bin\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n  \
+         TRACK 02 AUDIO\n    INDEX 00 00:00:50\n    INDEX 01 00:00:53\n",
+    )
+    .unwrap();
+    let chd_path = srcdir.join("src.chd");
+    crate::cd::create_from_cue(
+        &srcdir.join("src.cue"),
+        &chd_path,
+        crate::cd::CdCreateOptions {
+            codecs: [crate::CHD_CODEC_CD_LZMA, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_p| {},
+        &|| false,
+    )
+    .unwrap();
+
+    let mut chd = Chd::open(BufReader::new(File::open(&chd_path).unwrap()), None).unwrap();
+    let tracks = crate::cd::list_tracks(&mut chd).unwrap();
+    assert_eq!(tracks.len(), 2);
+    assert_eq!(tracks[0].track_num, 1);
+    assert_eq!(tracks[0].track_type, TrackType::Mode1Raw);
+    assert_eq!(tracks[0].frames, 50);
+    assert_eq!(tracks[0].pregap, 0);
+    assert_eq!(tracks[1].track_num, 2);
+    assert_eq!(tracks[1].track_type, TrackType::Audio);
+    assert_eq!(tracks[1].subcode_type, SubcodeType::None);
+    assert_eq!(tracks[1].frames, 30);
+    assert_eq!(tracks[1].pregap, 3);
+
+    let _ = std::fs::remove_dir_all(&srcdir);
+}

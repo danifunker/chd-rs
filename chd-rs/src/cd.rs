@@ -1,4 +1,4 @@
-//! CD-ROM CHDs — chdman `createcd` parity.
+//! CD-ROM CHDs — chdman `createcd` / `extractcd` parity.
 //!
 //! A CD CHD stores the disc as fixed **2448-byte frames** (`2352` sector + `96` subcode), eight
 //! frames to a `19584`-byte hunk, compressed with the CD wrapper codecs (`cdlz`/`cdzl`/`cdfl`/`cdzs`
@@ -12,13 +12,21 @@
 //! metadata, then reuse the shared V5 writer ([`write::write_create`](crate::write)). Output is
 //! **byte-identical to `chdman createcd`** (verified for `-c cdzl`/`cdlz`).
 //!
-//! Matches libchdman-rs's `cd` module. All four CD codecs (`cdlz`/`cdzl`/`cdzs`/`cdfl`) encode;
-//! extraction (`extractcd`), GDI/Nero parsing, and `list_tracks` are not yet implemented.
+//! [`extract_to_cue`] reverses this (chdman `extractcd`), and [`list_tracks`] reads the track
+//! table back. Both are byte-identical to chdman.
+//!
+//! Matches libchdman-rs's `cd` module. All four CD codecs (`cdlz`/`cdzl`/`cdzs`/`cdfl`) encode.
+//! GDI/Nero parsing, `.gdi`/split-bin extraction, and `CdCookedReader` are not yet implemented.
 
 use crate::error::{Error, Result};
-use crate::{write, CompressionProgress, CHD_CODEC_CD_FLAC, CHD_CODEC_CD_LZMA, CHD_CODEC_CD_ZLIB};
+use crate::metadata::Metadata;
+use crate::read::ChdReader;
+use crate::{
+    write, Chd, CompressionProgress, CHD_CODEC_CD_FLAC, CHD_CODEC_CD_LZMA, CHD_CODEC_CD_ZLIB,
+};
+use std::convert::TryInto;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Bytes of sector data in a CD frame (`2352`).
@@ -93,6 +101,38 @@ impl SubcodeType {
             SubcodeType::Raw => "RW_RAW",
             SubcodeType::None => "NONE",
         }
+    }
+}
+
+/// Per-track summary read back from a CD CHD's metadata (or a parsed TOC). Matches libchdman-rs's
+/// `TrackInfo`. Returned by [`list_tracks`].
+#[derive(Debug, Clone)]
+pub struct TrackInfo {
+    /// 1-based track number.
+    pub track_num: u32,
+    /// Track data type.
+    pub track_type: TrackType,
+    /// Subcode type.
+    pub subcode_type: SubcodeType,
+    /// Number of frames (sectors) in the track.
+    pub frames: u32,
+    /// Pregap length in frames.
+    pub pregap: u32,
+    /// Postgap length in frames.
+    pub postgap: u32,
+    /// Pregap sector type (`MODE1` unless the pregap carries data).
+    pub pregap_type: TrackType,
+    /// Pregap subcode type.
+    pub pregap_subcode: SubcodeType,
+}
+
+/// Map a subcode-type string to its [`SubcodeType`] (`RW`/`RW_RAW`, else `NONE`), as chdman's
+/// `convert_subtype_string_to_track_info` (`cdrom.cpp:777`).
+fn subtype_from_string(s: &str) -> SubcodeType {
+    match s {
+        "RW" => SubcodeType::Normal,
+        "RW_RAW" => SubcodeType::Raw,
+        _ => SubcodeType::None,
     }
 }
 
@@ -574,6 +614,243 @@ fn create_to_path(
     if res.is_err() {
         drop(out);
         let _ = std::fs::remove_file(out_path);
+    }
+    res
+}
+
+// ---------------------------------------------------------------------------
+// extractcd: read a CD CHD's track metadata + reconstruct cue/bin
+// ---------------------------------------------------------------------------
+
+/// A track parsed back from a CD CHD's `CHT2`/`CHTR` metadata, with the derived sizes the extractor
+/// needs (the read-side analogue of [`CdTrack`]). Port of `cdrom_file::parse_metadata`
+/// (`cdrom.cpp:899`) for the modern (`CHT2`) and legacy (`CHTR`) records.
+struct TrackMeta {
+    trktype: TrackType,
+    datasize: u32,
+    subtype: SubcodeType,
+    frames: u32,
+    extraframes: u32,
+    pregap: u32,
+    postgap: u32,
+    pgtype: TrackType,
+    pgsub: SubcodeType,
+    pgdatasize: u32,
+}
+
+/// Parse a `CHT2` (`"TRACK:.. TYPE:.. SUBTYPE:.. FRAMES:.. PREGAP:.. PGTYPE:.. PGSUB:.. POSTGAP:.."`)
+/// or legacy `CHTR` (`"TRACK:.. TYPE:.. SUBTYPE:.. FRAMES:.."`) payload. Mirrors
+/// `parse_metadata`: the pregap type/subcode are applied only when `pregap > 0` (and `PGTYPE` is
+/// `V`-prefixed for a data-bearing pregap); the 4-frame `extraframes` padding is recomputed here.
+fn parse_track_metadata(payload: &[u8]) -> Option<TrackMeta> {
+    let s = std::str::from_utf8(payload).ok()?;
+    let s = s.trim_end_matches('\0');
+
+    let (mut typ, mut subtype, mut pgtype_s, mut pgsub_s) = ("", "", "", "");
+    let (mut frames, mut pregap, mut postgap) = (None::<u32>, 0u32, 0u32);
+    for tok in s.split_whitespace() {
+        let (k, v) = tok.split_once(':')?;
+        match k {
+            "TYPE" => typ = v,
+            "SUBTYPE" => subtype = v,
+            "FRAMES" => frames = Some(v.parse().ok()?),
+            "PREGAP" => pregap = v.parse().ok()?,
+            "PGTYPE" => pgtype_s = v,
+            "PGSUB" => pgsub_s = v,
+            "POSTGAP" => postgap = v.parse().ok()?,
+            _ => {} // TRACK: (we rely on stored order) and anything else
+        }
+    }
+    let frames = frames?;
+    let (trktype, datasize) = type_from_string(typ)?;
+    let subtype = subtype_from_string(subtype);
+    let extraframes = frames.div_ceil(TRACK_PADDING) * TRACK_PADDING - frames;
+
+    // pregap defaults to MODE1/NONE; only a non-zero pregap reads PGTYPE/PGSUB (as parse_metadata).
+    let (mut pgtype, mut pgsub, mut pgdatasize) = (TrackType::Mode1, SubcodeType::None, 0u32);
+    if pregap > 0 {
+        if let Some(stripped) = pgtype_s.strip_prefix('V') {
+            if let Some((t, ds)) = type_from_string(stripped) {
+                pgtype = t;
+                pgdatasize = ds;
+            }
+        }
+        pgsub = subtype_from_string(pgsub_s);
+    }
+
+    Some(TrackMeta {
+        trktype,
+        datasize,
+        subtype,
+        frames,
+        extraframes,
+        pregap,
+        postgap,
+        pgtype,
+        pgsub,
+        pgdatasize,
+    })
+}
+
+/// Read all `CHT2`/`CHTR` track records from a CD CHD in stored (track) order.
+fn read_track_metas<F: Read + Seek>(chd: &mut Chd<F>) -> Result<Vec<TrackMeta>> {
+    let cht2 = crate::make_tag(b"CHT2");
+    let chtr = crate::make_tag(b"CHTR");
+    let metas: Vec<Metadata> = chd.metadata_refs().try_into()?;
+    let mut out = Vec::new();
+    for m in &metas {
+        if m.metatag == cht2 || m.metatag == chtr {
+            out.push(parse_track_metadata(&m.value).ok_or(Error::InvalidData)?);
+        }
+    }
+    if out.is_empty() {
+        return Err(Error::UnsupportedFormat);
+    }
+    Ok(out)
+}
+
+/// List a CD CHD's tracks (chdman's `cdrom_file::parse_metadata`), reading the `CHT2`/`CHTR`
+/// metadata. Takes `&mut Chd` (chd-rs reads metadata through a mutable borrow) rather than
+/// libchdman-rs's `&Chd`.
+pub fn list_tracks<F: Read + Seek>(chd: &mut Chd<F>) -> Result<Vec<TrackInfo>> {
+    let metas = read_track_metas(chd)?;
+    Ok(metas
+        .iter()
+        .enumerate()
+        .map(|(i, t)| TrackInfo {
+            track_num: i as u32 + 1,
+            track_type: t.trktype,
+            subcode_type: t.subtype,
+            frames: t.frames,
+            pregap: t.pregap,
+            postgap: t.postgap,
+            pregap_type: t.pgtype,
+            pregap_subcode: t.pgsub,
+        })
+        .collect())
+}
+
+/// MAME's `msf_string_from_frames` (`chdman.cpp:1072`): `"%02d:%02d:%02d"` (minutes:seconds:frames,
+/// 75 frames/second).
+fn msf_string(frames: u32) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        frames / (75 * 60),
+        (frames / 75) % 60,
+        frames % 75
+    )
+}
+
+/// Append one track's CUE lines (port of `output_track_metadata`'s `MODE_CUEBIN` branch,
+/// `chdman.cpp:1534`). `frameoffs` is the track's disc LBA (cumulative frames, no padding);
+/// `outputoffs` is the byte offset in the bin file (the `FILE` line is emitted only at offset 0).
+fn append_cue_track(
+    cue: &mut String,
+    idx: usize,
+    t: &TrackMeta,
+    frameoffs: u32,
+    bin_name: &str,
+    outputoffs: u64,
+) {
+    use std::fmt::Write;
+    if outputoffs == 0 {
+        let _ = writeln!(cue, "FILE \"{bin_name}\" BINARY");
+    }
+    let typestr = match t.trktype {
+        TrackType::Mode1 | TrackType::Mode1Raw => format!("MODE1/{:04}", t.datasize),
+        TrackType::Mode2
+        | TrackType::Mode2Form1
+        | TrackType::Mode2Form2
+        | TrackType::Mode2FormMix
+        | TrackType::Mode2Raw => format!("MODE2/{:04}", t.datasize),
+        TrackType::Audio => "AUDIO".to_string(),
+    };
+    let _ = writeln!(cue, "  TRACK {:02} {typestr}", idx + 1);
+    if t.pregap > 0 && t.pgdatasize == 0 {
+        let _ = writeln!(cue, "    PREGAP {}", msf_string(t.pregap));
+        let _ = writeln!(cue, "    INDEX 01 {}", msf_string(frameoffs));
+    } else if t.pregap > 0 && t.pgdatasize > 0 {
+        let _ = writeln!(cue, "    INDEX 00 {}", msf_string(frameoffs));
+        let _ = writeln!(cue, "    INDEX 01 {}", msf_string(frameoffs + t.pregap));
+    }
+    if t.pregap == 0 {
+        let _ = writeln!(cue, "    INDEX 01 {}", msf_string(frameoffs));
+    }
+    if t.postgap > 0 {
+        let _ = writeln!(cue, "    POSTGAP {}", msf_string(t.postgap));
+    }
+}
+
+/// Extract a CD CHD to a single CUE sheet + BIN (chdman `extractcd`, the `MODE_CUEBIN` non-split
+/// path), **byte-identical to `chdman extractcd -o <cue> -ob <bin>`**.
+///
+/// Reconstructs the combined BIN (each track's `frames` sectors of `datasize` bytes, audio tracks
+/// byte-pair-swapped back to little-endian, the 4-frame padding between tracks dropped, subcode
+/// omitted) and the CUE (one `FILE` line + per-track `TRACK`/`INDEX`/`PREGAP`/`POSTGAP`, exactly as
+/// `output_track_metadata`). `progress` is called with the running BIN byte count.
+///
+/// GD-ROM, split-bin, and `.gdi`/`.toc` outputs are not yet supported; a track that stored subcode
+/// has it silently dropped (as bin/cue cannot represent it).
+pub fn extract_to_cue(
+    chd_path: &Path,
+    cue_path: &Path,
+    bin_path: &Path,
+    progress: &mut dyn FnMut(u64),
+) -> Result<()> {
+    let f = BufReader::new(File::open(chd_path).map_err(Error::from)?);
+    let mut chd = Chd::open(f, None)?;
+    let tracks = read_track_metas(&mut chd)?;
+
+    let bin_name = bin_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or(Error::InvalidParameter)?
+        .to_string();
+
+    let res = (|| -> Result<()> {
+        let mut bin = BufWriter::new(File::create(bin_path).map_err(Error::from)?);
+        let mut cue = String::new();
+        let mut reader = ChdReader::new(chd);
+        let mut frame = vec![0u8; CD_FRAME_SIZE as usize];
+        let mut discoffs = 0u32; // disc LBA (cumulative frames, no padding) — for the cue
+        let mut written = 0u64; // bin byte offset
+
+        for (i, t) in tracks.iter().enumerate() {
+            append_cue_track(&mut cue, i, t, discoffs, &bin_name, written);
+
+            let ds = t.datasize as usize;
+            for _ in 0..t.frames {
+                reader.read_exact(&mut frame).map_err(Error::from)?;
+                if t.trktype == TrackType::Audio {
+                    let mut k = 0;
+                    while k + 1 < ds {
+                        frame.swap(k, k + 1);
+                        k += 2;
+                    }
+                }
+                bin.write_all(&frame[..ds]).map_err(Error::from)?;
+                written += ds as u64;
+            }
+            // consume (drop) the track's 4-frame-boundary padding so the next track aligns
+            for _ in 0..t.extraframes {
+                reader.read_exact(&mut frame).map_err(Error::from)?;
+            }
+            discoffs += t.frames;
+            progress(written);
+        }
+
+        bin.flush().map_err(Error::from)?;
+        // chdman writes the TOC in text mode, so its line endings follow the host platform (CRLF on
+        // Windows, LF elsewhere). Match the same-platform chdman for byte-identity.
+        #[cfg(windows)]
+        let cue = cue.replace('\n', "\r\n");
+        std::fs::write(cue_path, cue.as_bytes()).map_err(Error::from)?;
+        Ok(())
+    })();
+
+    if res.is_err() {
+        let _ = std::fs::remove_file(bin_path);
+        let _ = std::fs::remove_file(cue_path);
     }
     res
 }
