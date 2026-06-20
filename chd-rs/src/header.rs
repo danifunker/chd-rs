@@ -26,7 +26,7 @@ use text_io::try_scan;
 
 /// The types of compression codecs supported in a CHD file.
 #[repr(u32)]
-#[derive(FromPrimitive, Debug)]
+#[derive(FromPrimitive, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecType {
     /// No compression.
     None = 0,
@@ -105,6 +105,44 @@ impl CodecType {
                 CdZstdCodec::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionCodec>)
             }
             #[allow(unreachable_patterns)]
+            _ => Err(Error::UnsupportedFormat),
+        }
+    }
+
+    /// Initializes the encoder for this codec type and the provided hunk size.
+    ///
+    /// The encode mirror of [`CodecType::init`]. Codecs are added per milestone; types
+    /// without an encoder yet return [`Error::UnsupportedFormat`]. Available with the
+    /// `write` feature.
+    #[cfg(feature = "write")]
+    pub(crate) fn init_encoder(
+        &self,
+        hunk_size: u32,
+    ) -> Result<Box<dyn crate::compression::CompressionEncoder>> {
+        use crate::compression::codecs::{
+            HuffmanEncoder, LzmaEncoder, NoneEncoder, RawFlacEncoder, ZlibEncoder,
+        };
+        use crate::compression::CodecEncodeImplementation;
+        use crate::compression::CompressionEncoder;
+        match self {
+            CodecType::None => {
+                NoneEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
+            }
+            CodecType::Zlib | CodecType::ZlibPlus | CodecType::ZLibV5 => {
+                ZlibEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
+            }
+            CodecType::LzmaV5 => {
+                LzmaEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
+            }
+            CodecType::HuffV5 => {
+                HuffmanEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
+            }
+            CodecType::FlacV5 => {
+                RawFlacEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
+            }
+            #[cfg(feature = "write-zstd")]
+            CodecType::ZstdV5 => crate::compression::codecs::ZstdEncoder::new(hunk_size)
+                .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
             _ => Err(Error::UnsupportedFormat),
         }
     }

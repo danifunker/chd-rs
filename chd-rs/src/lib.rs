@@ -23,7 +23,8 @@
 //! [`Chd`](crate::Chd), direct iteration of hunks is not possible without
 //! Generic Associated Types. Instead, the hunk indices should be iterated over.
 //!
-//!```rust
+//!```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::fs::File;
 //! use std::io::BufReader;
 //! use chd::Chd;
@@ -42,28 +43,36 @@
 //!     let mut hunk = chd.hunk(hunk_num)?;
 //!     hunk.read_hunk_in(&mut cmp_buf, &mut hunk_buf)?;
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Iterating over metadata
 //! Metadata in a CHD file consists of a list of entries that contain offsets to the
-//! byte data of the metadata contents in the CHD file. The individual metadata entries
-//! can be iterated directly, but a reference to the source stream has to be provided to
-//! read the data.
-//! ```rust
+//! byte data of the metadata contents in the CHD file. The metadata entry references can be
+//! collected, then a reference to the source stream has to be provided to read each entry's data.
+//! ```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::fs::File;
 //! use std::io::BufReader;
 //! use chd::Chd;
 //!
 //! let mut f = BufReader::new(File::open("file.chd")?);
-//! let mut chd = Chd::open(&mut f, None)?;
-//! let entries = chd.metadata_refs()?;
+//! // Collect the metadata entry references, dropping the `Chd` to release the borrow on `f`.
+//! let entries: Vec<_> = {
+//!     let mut chd = Chd::open(&mut f, None)?;
+//!     chd.metadata_refs().collect()
+//! };
 //! for entry in entries {
 //!     let metadata = entry.read(&mut f)?;
 //! }
+//! # Ok(())
+//! # }
 //!```
 //! `Vec<Metadata>` implements `TryFrom<MetadataRefs>` so all metadata entries
 //! can be collected at once without requiring a reference to the file.
-//! ```rust
+//! ```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::fs::File;
 //! use std::io::BufReader;
 //! use chd::Chd;
@@ -73,7 +82,9 @@
 //! // chd takes ownership of f here
 //! let mut chd = Chd::open(f, None)?;
 //!
-//! let metadatas: Vec<Metadata> = chd.metadata_refs()?.try_into()?;
+//! let metadatas: Vec<Metadata> = chd.metadata_refs().try_into()?;
+//! # Ok(())
+//! # }
 //!```
 //!
 
@@ -97,6 +108,15 @@ pub mod huffman;
 
 #[cfg(not(feature = "huffman_api"))]
 mod huffman;
+
+#[cfg(feature = "write")]
+mod huffman_encode;
+
+#[cfg(feature = "write")]
+mod write;
+
+#[cfg(all(test, feature = "chdman_compat_tests", feature = "write"))]
+mod chdman_compat;
 
 #[cfg(feature = "codec_api")]
 /// Implementations of decompression codecs used in MAME CHD.
@@ -139,10 +159,48 @@ pub(crate) use const_assert;
 
 pub use chdfile::{Chd, Hunk};
 pub use error::{Error, Result};
+pub mod codec;
 pub mod header;
 pub mod map;
 pub mod metadata;
 pub mod read;
+
+// Re-export the codec FourCC constants + helpers at the crate root, matching libchdman-rs's
+// surface so code written against it ports unchanged.
+pub use codec::{
+    codec_exists, codec_name, parse_codec_spec, CHD_CODEC_AVHUFF, CHD_CODEC_CD_FLAC,
+    CHD_CODEC_CD_LZMA, CHD_CODEC_CD_ZLIB, CHD_CODEC_CD_ZSTD, CHD_CODEC_FLAC, CHD_CODEC_HUFF,
+    CHD_CODEC_LZMA, CHD_CODEC_NONE, CHD_CODEC_ZLIB, CHD_CODEC_ZSTD,
+};
+
+/// Progress of a create/compress operation, passed to the `progress` callback that the create
+/// functions in [`hd`](crate::hd) (and, later, `cd`/`dvd`/`copy`) take. Matches libchdman-rs's
+/// `CompressionProgress` field-for-field.
+///
+/// Available with the `write` feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+#[derive(Debug, Clone, Copy)]
+pub struct CompressionProgress {
+    /// Logical bytes processed so far (`0..=bytes_total`).
+    pub bytes_done: u64,
+    /// Total logical bytes to process.
+    pub bytes_total: u64,
+    /// Running compressed/logical size ratio (`0.0..=1.0+`); `1.0` before any data is processed.
+    pub ratio: f64,
+}
+
+/// Hard-disk CHD creation/extraction (chdman `createraw`/`extractraw`; `createhd`/`extracthd`
+/// geometry helpers). Available with the `write` feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod hd;
+
+/// Re-compress a CHD into a different codec set or hunk size (chdman `copy`). Available with the
+/// `write` feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod copy;
 
 #[cfg(feature = "unstable_lending_iterators")]
 #[cfg_attr(docsrs, doc(cfg(unstable_lending_iterators)))]
