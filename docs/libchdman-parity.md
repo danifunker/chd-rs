@@ -29,10 +29,11 @@ and [docs/chdman-mapping.md](../../libchdman-rs/docs/chdman-mapping.md).
   `compute_overall_sha1`, wired into the compressed and uncompressed writers.
 
 - **`copy` module** (public): `copy::copy` + `CopyOptions`, byte-identical to `chdman copy`.
+- **`dvd` module** (public): `dvd::create_from_*`/`extract_to_*` + `DvdCreateOptions`, byte-identical
+  to `chdman createdvd`.
 
-**Left:** `createdvd`/`createcd` (the other metadata-writing create paths); metadata write/delete on
-**existing** CHDs; `cd`/`dvd`; `info`/`verify`; parent/diff + runtime writes; remaining docs.
-Everything below.
+**Left:** `createcd` (the CD create path); metadata write/delete on **existing** CHDs; `cd`;
+`info`/`verify`; parent/diff + runtime writes; remaining docs. Everything below.
 
 ---
 
@@ -128,8 +129,8 @@ wrapper) · ⬜ to build.
 
 | libchdman-rs | chd-rs target | status | notes |
 | --- | --- | --- | --- |
-| `DvdCreateOptions{logical_size,hunk_size,codecs}` (default 4096, `[lzma,zlib,huff,flac]`) | same | ⬜ | needs flac. |
-| `create_from_iso/create_from_reader`, `extract_to_iso/extract_to_writer` | new | ⬜ | empty `DVD ` metadata record (1-NUL-byte quirk). |
+| `DvdCreateOptions{logical_size,hunk_size,codecs}` (default 4096, `[lzma,zlib,huff,flac]`) | `dvd::DvdCreateOptions` | ✅ | done. |
+| `create_from_iso/create_from_reader`, `extract_to_iso/extract_to_writer` | `dvd::*` | ✅ | done & byte-identical; empty `DVD ` record (1-NUL-byte quirk). |
 
 ### 3.6 `copy` module
 
@@ -172,7 +173,8 @@ Ordered by dependency; maps onto PARITY_PLAN M3–M8.
   **existing** CHDs (splice the on-disk linked list: overwrite-in-place when the new payload fits,
   else unlink + append; update the previous entry's `next` / the header `meta_offset`) — verify
   `addmeta`/`delmeta` byte-identity.
-- **Phase D — `dvd` module.** Flat 2048 sectors + empty `DVD ` record. Verify `createdvd`.
+- **Phase D — `dvd` module. ✅ DONE.** Flat 2048 sectors + the empty `DVD ` record (1-NUL payload),
+  reusing the createhd metadata writer. `createdvd` verified byte-identical (`-c none/zlib/lzma`).
 - **Phase E — `cd` module.** Pure-Rust TOC parser, CD encoders (sector/subcode split + ECC via
   `ecc.rs`, subcode via `zlib`), CHT2 metadata, `list_tracks`, `extract_to_{cue,iso,gdi}`,
   `CdCookedReader`. Verify `createcd`/`extractcd`.

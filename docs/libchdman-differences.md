@@ -125,6 +125,18 @@ Byte-identical to `chdman copy`: re-compresses the source's logical bytes into t
 list/hunk size and clones every metadata record verbatim, preserving the unit size and `raw_sha1`.
 (Legacy CD/GD metadata re-do is not yet implemented — that lands with the `cd` module.)
 
+### DVD (`createdvd` / `extractdvd`)
+
+```rust
+use chd::dvd::{self, DvdCreateOptions};
+dvd::create_from_iso(iso_path, out_path, DvdCreateOptions::default(), &mut |_p| {}, &|| false)?;
+dvd::extract_to_iso(chd_path, iso_path, &mut |_done| {})?;
+```
+
+Same shape as libchdman-rs's `dvd` module; byte-identical to `chdman createdvd`. Flat 2048-byte
+sectors + the empty `DVD ` metadata record. `extract_*` rejects non-DVD CHDs with
+`Error::UnsupportedFormat`.
+
 ---
 
 ## 3. Progress & cancellation (replaces `ChdCompressor`/`ChdDataHandler`/`CompressStep`)

@@ -17,17 +17,22 @@ compressed (now **multi-codec**: zlib/huff/lzma/zstd + **flac**), **self-hunk de
 `compress_v5_map`, and SHA-1, all verified end-to-end. All five bit-exact codec encoders are wired
 (flac via `libflac-rs`, round-trip-verified through chdman; byte-identity is libm-gated — see below).
 
-**Now:** **Phases A, B, and the `copy` half of C are done.** A: `codec` module, `flac` encoder,
-multi-codec `write_raw`, `CompressionProgress` + `progress`/`cancel`, public `hd` createraw +
-extract + geometry. B: full **`createhd`** (metadata writer + overall SHA-1 + GDDD/IDNT),
-byte-identical. C: **`copy`** (`copy::copy` + `CopyOptions`) — recompress + clone metadata,
-byte-identical to `chdman copy`. Remaining in C: `write_metadata`/`delete_metadata` on *existing*
-CHDs (splice the on-disk linked list). Then D (`dvd`), E (`cd`), F (parent/diff + `HdImage`),
-G (`info`/`verify`, rchdman).
+**Now:** **Phases A, B, C-`copy`, and D are done.** A: `codec` module, `flac` encoder, multi-codec
+`write_raw`, `CompressionProgress` + `progress`/`cancel`, public `hd` createraw + extract + geometry.
+B: full **`createhd`** (metadata writer + overall SHA-1 + GDDD/IDNT). C: **`copy`** (recompress +
+clone metadata). D: **`dvd`** (`createdvd`/`extractdvd`, `DVD ` record). All byte-identical to
+chdman 0.288. Remaining: C's `write_metadata`/`delete_metadata` on *existing* CHDs; then E (`cd`),
+F (parent/diff + `HdImage`), G (`info`/`verify`, rchdman).
 
 **Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target). See
-"Verification gates" below. **36 write/compat tests green** (the 5 failing `read_*` tests are
+"Verification gates" below. **40 write/compat tests green** (the 5 failing `read_*` tests are
 pre-existing missing-fixture cases, unrelated to write).
+
+**CI:** chd-rs has **no CI** (siblings do). Blocked: the `write` feature's optional **path deps** on
+the sibling crates (`../../lzma-sdk-rs`, …) make even the default build's dependency resolution fail
+in a fresh checkout. Unblock = switch to crates.io **version deps** (all four siblings are
+published/tagged) + a workspace `[patch.crates-io]` for local dev. Deferred pending the crate-identity
+decision (may become a new crate).
 
 ---
 
@@ -150,8 +155,12 @@ pre-existing missing-fixture cases, unrelated to write).
 
 ## M5 — `dvd` module
 
-- [ ] `DvdCreateOptions` (hunk 4096, codecs `[lzma,zlib,huff,flac]`); empty `DVD ` record
-      (note the 1-NUL-byte quirk); create/extract; tests
+- [x] `DvdCreateOptions` (hunk 4096, codecs `[lzma,zlib,huff,flac]`, unit 2048) ✅
+- [x] `create_from_reader`/`create_from_iso` + `extract_to_writer`/`extract_to_iso` ✅ — empty
+      `DVD ` record (the 1-NUL-byte quirk: chdman's `write_metadata(.., "")` stores the string's NUL
+      terminator → 1-byte payload). Reuses the createhd machinery (`DVD ` instead of GDDD).
+- [x] Tests ✅ — `createdvd -c none/zlib/lzma` byte-identical to chdman; extract round-trip
+      (partial last hunk) + non-DVD rejection.
 
 ## M6 — `cd` module
 
@@ -216,13 +225,22 @@ Tracked in detail in [docs/libchdman-parity.md](docs/libchdman-parity.md). Phase
   hd item carried into B, since it needs the metadata writer.)
 - [x] **B** — `hd` createhd ✅ — metadata writer (new files) + overall SHA-1 + `create_from_*`
   writing GDDD (+ optional IDNT), byte-identical to chdman.
-- [~] **C** — `copy` ✅ (`copy::copy`, byte-identical: recompress via `write_raw` + clone metadata,
-  preserve unit_bytes). Remaining: `write_metadata`/`delete_metadata` on *existing* CHDs (splice the
-  on-disk linked list). · [ ] **D** — `dvd` · [ ] **E** — `cd` · [ ] **F** — parent/diff +
-  `HdImage` · [ ] **G** — `Chd::info`/`verify`, rchdman, remaining docs.
+- [~] **C** — `copy` ✅ (`copy::copy`, byte-identical). Remaining: `write_metadata`/`delete_metadata`
+  on *existing* CHDs (splice the on-disk linked list).
+- [x] **D** — `dvd` ✅ — `createdvd`/`extractdvd` byte-identical (`DVD ` record, 2048 sectors).
+- [ ] **E** — `cd` · [ ] **F** — parent/diff + `HdImage` · [ ] **G** — `Chd::info`/`verify`,
+  rchdman, remaining docs.
 
 ## Session log
 
+- 2026-06-20: **Phase D `dvd` landed — byte-identical to `chdman createdvd`.** New `dvd` module
+  (`DvdCreateOptions`, `create_from_reader`/`create_from_iso`, `extract_to_writer`/`extract_to_iso`,
+  `DVD_SECTOR_SIZE`/`DEFAULT_HUNK_SIZE`). It's createhd with a `DVD ` record (1-NUL payload — chdman
+  writes an empty C string, storing the NUL terminator) instead of GDDD, unit 2048. Hoisted the
+  shared create dispatch (`read_and_pad` + `write_create`) into `write.rs` so hd/copy/dvd reuse it.
+  Verified byte-identical for `-c none/zlib/lzma` + extract round-trip / non-DVD rejection. 40
+  write/compat tests green. **Also investigated CI:** chd-rs has none; it's blocked by the write
+  feature's sibling path deps (even default resolve fails without them) — see the CI note above.
 - 2026-06-20: **Phase C `copy` landed — byte-identical to `chdman copy`.** New `copy` module
   (`copy::copy` + `CopyOptions{hunk_size:Option<u32>, codecs}`, matching libchdman-rs): open the
   source, snapshot its metadata in linked-list order, read the full logical image via `ChdReader`
