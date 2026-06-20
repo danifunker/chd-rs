@@ -216,6 +216,40 @@ pub struct ChdInfo {
     pub is_av: bool,
 }
 
+/// Result of [`Chd::verify`]: the SHA-1 checksums recomputed from the data, alongside the values
+/// stored in the header. Available with the `verify` feature.
+#[cfg(feature = "verify")]
+#[cfg_attr(docsrs, doc(cfg(feature = "verify")))]
+#[derive(Debug, Clone)]
+pub struct VerifyResult {
+    /// Raw SHA-1 recomputed over the logical (decompressed, unpadded) data.
+    pub computed_raw_sha1: [u8; 20],
+    /// Overall SHA-1 recomputed from the raw SHA-1 + the checksummed metadata.
+    pub computed_sha1: [u8; 20],
+    /// Raw-data SHA-1 stored in the header.
+    pub expected_raw_sha1: [u8; 20],
+    /// Overall (metadata-inclusive) SHA-1 stored in the header.
+    pub expected_sha1: [u8; 20],
+}
+
+#[cfg(feature = "verify")]
+impl VerifyResult {
+    /// Whether the recomputed raw-data SHA-1 matches the header.
+    pub fn raw_sha1_valid(&self) -> bool {
+        self.computed_raw_sha1 == self.expected_raw_sha1
+    }
+
+    /// Whether the recomputed overall (metadata-inclusive) SHA-1 matches the header.
+    pub fn overall_sha1_valid(&self) -> bool {
+        self.computed_sha1 == self.expected_sha1
+    }
+
+    /// Whether both the raw-data and overall SHA-1 checksums match the header.
+    pub fn is_valid(&self) -> bool {
+        self.raw_sha1_valid() && self.overall_sha1_valid()
+    }
+}
+
 /// Progress of a create/compress operation, passed to the `progress` callback that the create
 /// functions in [`hd`](crate::hd) (and, later, `cd`/`dvd`/`copy`) take. Matches libchdman-rs's
 /// `CompressionProgress` field-for-field.

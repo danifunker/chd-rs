@@ -25,7 +25,11 @@ codec_api = []
 # write/encode support (off by default; gates all encode code so read-only
 # consumers pull in nothing). Pulls in the bit-exact codec crates needed for the
 # default codec sets (lzma + flac are in the DVD default).
-write = ["std", "dep:lzma-sdk-rs", "dep:zlib-bitexact-rs", "dep:libflac-rs", "dep:sha1"]
+write = ["std", "verify", "dep:lzma-sdk-rs", "dep:zlib-bitexact-rs", "dep:libflac-rs"]
+# Read-side integrity check: Chd::verify() recomputes the raw + overall SHA-1 and
+# compares to the header. Only adds the small pure-Rust `sha1` crate; `write`
+# enables it transitively.
+verify = ["std", "dep:sha1"]
 # zstd/cdzs encode. Aligned: libzstd-bitexact-rs 0.155 is byte-exact with zstd
 # 1.5.5 (chdman's version). Separate from `write` because the zstd crate is large
 # and zstd/cdzs are not in any default codec set.

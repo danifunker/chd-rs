@@ -17,6 +17,36 @@ use num_traits::ToPrimitive;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::panic::AssertUnwindSafe;
 
+/// Read-side port of `chd_file::compute_overall_sha1` (`chd.cpp:1709`):
+/// `SHA1(raw_sha1 ‖ sorted[ tag(4 BE) ‖ SHA1(payload) ])` over the CHECKSUM-flagged metadata
+/// (sorted by the 24-byte `(tag, sha1)` tuple). Used by [`Chd::verify`].
+#[cfg(feature = "verify")]
+fn verify_overall_sha1(raw_sha1: &[u8; 20], metas: &[crate::metadata::Metadata]) -> [u8; 20] {
+    use sha1::{Digest, Sha1};
+    const CHD_MDFLAGS_CHECKSUM: u8 = 0x01;
+    let mut hashes: Vec<[u8; 24]> = Vec::new();
+    for m in metas {
+        if m.flags & CHD_MDFLAGS_CHECKSUM == 0 {
+            continue;
+        }
+        let mut h = [0u8; 24];
+        h[0..4].copy_from_slice(&m.metatag.to_be_bytes());
+        let mut sh = Sha1::new();
+        sh.update(&m.value);
+        let payload_sha1: [u8; 20] = sh.finalize().into();
+        h[4..24].copy_from_slice(&payload_sha1);
+        hashes.push(h);
+    }
+    hashes.sort_unstable();
+
+    let mut hasher = Sha1::new();
+    hasher.update(raw_sha1);
+    for h in &hashes {
+        hasher.update(h);
+    }
+    hasher.finalize().into()
+}
+
 /// A CHD (MAME Compressed Hunks of Data) file.
 pub struct Chd<F: Read + Seek> {
     file: F,
@@ -184,6 +214,58 @@ impl<F: Read + Seek> Chd<F> {
     pub fn get_hunksized_buffer(&self) -> Vec<u8> {
         let hunk_size = self.header.hunk_size() as usize;
         vec![0u8; hunk_size]
+    }
+
+    /// Verify a compressed CHD's integrity by recomputing its SHA-1 checksums and comparing them to
+    /// the header (chdman `verify`). Decompresses every hunk to recompute the **raw** SHA-1 (over the
+    /// logical, unpadded bytes) and the **overall** SHA-1 (`SHA1(raw_sha1 ‖ sorted checksummed
+    /// metadata hashes)`); the returned [`VerifyResult`](crate::VerifyResult) carries both computed
+    /// and expected values (check [`is_valid`](crate::VerifyResult::is_valid)).
+    ///
+    /// Returns [`Error::UnsupportedFormat`] for an **uncompressed** CHD (those carry no stored
+    /// checksum — chdman likewise refuses). If the CHD references a parent, it must have been opened
+    /// with that parent (parent-ref hunks are read through it). Available with the `verify` feature.
+    #[cfg(feature = "verify")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "verify")))]
+    pub fn verify(&mut self) -> Result<crate::VerifyResult> {
+        use sha1::{Digest, Sha1};
+
+        if !self.header.is_compressed() {
+            return Err(Error::UnsupportedFormat);
+        }
+        let expected_raw_sha1 = self
+            .header
+            .raw_sha1()
+            .or_else(|| self.header.sha1())
+            .ok_or(Error::UnsupportedFormat)?;
+        let expected_sha1 = self.header.sha1().unwrap_or(expected_raw_sha1);
+        let logical = self.header.logical_bytes();
+        let hunk_bytes = self.header.hunk_size() as u64;
+        let hunk_count = self.header.hunk_count();
+
+        // Collect the metadata first (owns its bytes), then hash the hunks.
+        let metas: Vec<crate::metadata::Metadata> = self.metadata_refs().try_into()?;
+
+        // raw_sha1 is over the *logical* (unpadded) bytes — drop the final hunk's zero padding.
+        let mut hasher = Sha1::new();
+        let mut comp = Vec::new();
+        let mut buf = vec![0u8; hunk_bytes as usize];
+        let mut remaining = logical;
+        for i in 0..hunk_count {
+            self.hunk(i)?.read_hunk_in(&mut comp, &mut buf)?;
+            let take = remaining.min(hunk_bytes) as usize;
+            hasher.update(&buf[..take]);
+            remaining -= take as u64;
+        }
+        let computed_raw_sha1: [u8; 20] = hasher.finalize().into();
+        let computed_sha1 = verify_overall_sha1(&computed_raw_sha1, &metas);
+
+        Ok(crate::VerifyResult {
+            computed_raw_sha1,
+            computed_sha1,
+            expected_raw_sha1,
+            expected_sha1,
+        })
     }
 
     #[cfg_attr(docsrs, doc(cfg(unstable_lending_iterators)))]
@@ -519,5 +601,113 @@ impl Codecs {
                 _ => None,
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "write"))]
+mod verify_tests {
+    use crate::Chd;
+    use std::io::Cursor;
+
+    /// Deterministic mixed-compressibility bytes.
+    fn make_input(len: usize) -> Vec<u8> {
+        let mut v = Vec::with_capacity(len);
+        let mut x: u32 = 0x2545_f491;
+        for i in 0..len {
+            let b = match (i / 96) % 3 {
+                0 => 0u8,
+                1 => b"the quick brown fox "[i % 20],
+                _ => {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    (x & 0xff) as u8
+                }
+            };
+            v.push(b);
+        }
+        v
+    }
+
+    /// `verify()` accepts a freshly written compressed CHD, and detects a corrupted stored raw SHA-1
+    /// (data path) and a corrupted metadata payload (overall-SHA-1 path) independently.
+    #[test]
+    fn verify_detects_data_and_metadata_corruption() {
+        // createhd (256 KiB) writes a GDDD record → exercises the metadata-inclusive overall SHA-1.
+        let input = make_input(256 * 1024);
+        let mut cur = Cursor::new(Vec::new());
+        crate::hd::create_from_reader(
+            &input[..],
+            &mut cur,
+            crate::hd::HdCreateOptions {
+                codecs: [crate::CHD_CODEC_ZLIB, 0, 0, 0],
+                ..Default::default()
+            },
+            &mut |_| {},
+            &|| false,
+        )
+        .unwrap();
+        let bytes = cur.into_inner();
+
+        // pristine → valid
+        let mut chd = Chd::open(Cursor::new(bytes.clone()), None).unwrap();
+        let r = chd.verify().unwrap();
+        assert!(r.is_valid(), "fresh CHD should verify: {r:?}");
+
+        // corrupt the stored raw SHA-1 (header byte 64) → raw mismatch, overall mismatch.
+        let mut c1 = bytes.clone();
+        c1[64] ^= 0xff;
+        let r1 = Chd::open(Cursor::new(c1), None).unwrap().verify().unwrap();
+        assert!(
+            !r1.raw_sha1_valid(),
+            "corrupted stored raw SHA-1 must be detected"
+        );
+        assert!(!r1.is_valid());
+
+        // corrupt a metadata payload byte → overall mismatch, but the data (raw) is intact.
+        let meta_off = u64::from_be_bytes(bytes[48..56].try_into().unwrap()) as usize;
+        let mut c2 = bytes.clone();
+        c2[meta_off + 16 + 8] ^= 0xff; // 16-byte entry header, then into the GDDD payload
+        let r2 = Chd::open(Cursor::new(c2), None).unwrap().verify().unwrap();
+        assert!(
+            r2.raw_sha1_valid(),
+            "data is intact so raw SHA-1 should still match"
+        );
+        assert!(
+            !r2.overall_sha1_valid(),
+            "corrupted metadata must fail the overall SHA-1"
+        );
+        assert!(!r2.is_valid());
+    }
+
+    /// `verify()` hashes the *logical* (unpadded) bytes: a createraw CHD with a partial last hunk
+    /// (no metadata, so overall = SHA1(raw_sha1)) verifies.
+    #[test]
+    fn verify_partial_last_hunk_and_uncompressed() {
+        // 5 full 4096-hunks + 3 × 512 units = partial last hunk.
+        let input = make_input(4096 * 5 + 512 * 3);
+        let mut cur = Cursor::new(Vec::new());
+        crate::write::write_raw(
+            &mut cur,
+            &input,
+            4096,
+            512,
+            &[crate::header::CodecType::ZLibV5],
+        )
+        .unwrap();
+        let mut chd = Chd::open(Cursor::new(cur.into_inner()), None).unwrap();
+        assert!(
+            chd.verify().unwrap().is_valid(),
+            "partial-last-hunk CHD should verify (raw SHA-1 over logical bytes)"
+        );
+
+        // uncompressed CHDs carry no checksum → verify refuses.
+        let mut cur2 = Cursor::new(Vec::new());
+        crate::write::write_raw_uncompressed(&mut cur2, &input, 4096, 512).unwrap();
+        let mut chd2 = Chd::open(Cursor::new(cur2.into_inner()), None).unwrap();
+        assert!(matches!(
+            chd2.verify(),
+            Err(crate::Error::UnsupportedFormat)
+        ));
     }
 }
