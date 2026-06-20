@@ -86,11 +86,12 @@ wrapper) · ⬜ to build.
 | `read_metadata(tag, index)` | `chd.metadata()` / `metadata_refs()` filter | 🟡 | optional `Chd::read_metadata(tag,index)` convenience. |
 | `write_metadata/delete_metadata` | `metadata::write_metadata`/`delete_metadata` | ✅ | done & byte-identical (free fns over `Read+Write+Seek`, not methods on `Chd`). chdman edits only uncompressed CHDs; chd-rs also handles compressed. |
 | `clone_all_metadata(src)` | `copy` module (clones all metadata) | ✅ | done inside `copy::copy`. |
-| `info() -> ChdInfo` | new `ChdInfo` + `Chd::info()` | ⬜ | aggregate header + track count + `is_hd/cd/gd/dvd/av`. |
-| `verify()` | new `Chd::verify()` | ⬜ | rchdman already has the logic — lift into the lib. |
+| `info() -> ChdInfo` | `ChdInfo` + `Chd::info()` | ✅ | done; header + metadata tags + track count + `is_hd/cd/gd/dvd/av` (read-side). |
+| `verify()` | new `Chd::verify()` | ⬜ | deferred — needs a SHA-1 dep in the read-only build. |
 | `make_tag(a,b,c,d)` | `make_tag(&[u8;4])` (private) | 🟡 | expose (note signature difference) or add a 4-arg form. |
 | `CompressionProgress` | `crate::CompressionProgress` | ✅ | `{bytes_done,bytes_total,ratio}` matched exactly (crate root, `write` feature). |
-| `ChdInfo`, `HunkInfo`, `CompressStep` | new value types | ⬜ | `ChdInfo`/`info()` + `verify()` land in Phase G. |
+| `ChdInfo` | `crate::ChdInfo` | ✅ | done (crate root). |
+| `HunkInfo`, `CompressStep` | new value types | ⬜ | minor; `verify()` lands in Phase G. |
 | `ChdIo`, `ChdDataHandler`, `ChdCompressor` | — | 🟡 (document) | not ported: chd-rs is generic + synchronous. Document the equivalent patterns. |
 
 ### 3.2 `codec` module

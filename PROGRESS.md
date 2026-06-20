@@ -25,9 +25,10 @@ All byte-identical to chdman 0.288. Remaining: **E (`cd`)** — the big one (TOC
 ECC, CHT2); then F (parent/diff + `HdImage`), G (`info`/`verify`, rchdman).
 
 **Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target). See
-"Verification gates" below. **42 write/compat tests green** (the 5 failing `read_*` tests are
+"Verification gates" below. **43 write/compat tests green** (the 5 failing `read_*` tests are
 pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`):
 clones the sibling codec crates at their tags, then builds/tests on ubuntu/windows/macos + fmt.
+**`Chd::info()` + `ChdInfo`** (read-side) also landed (Phase G partial).
 
 **CI:** chd-rs has **no CI** (siblings do). Blocked: the `write` feature's optional **path deps** on
 the sibling crates (`../../lzma-sdk-rs`, …) make even the default build's dependency resolution fail
@@ -231,8 +232,8 @@ Tracked in detail in [docs/libchdman-parity.md](docs/libchdman-parity.md). Phase
   writing GDDD (+ optional IDNT), byte-identical to chdman.
 - [x] **C** — `copy` ✅ + `write_metadata`/`delete_metadata` on existing CHDs ✅ — all byte-identical.
 - [x] **D** — `dvd` ✅ — `createdvd`/`extractdvd` byte-identical (`DVD ` record, 2048 sectors).
-- [ ] **E** — `cd` · [ ] **F** — parent/diff + `HdImage` · [ ] **G** — `Chd::info`/`verify`,
-  rchdman, remaining docs.
+- [ ] **E** — `cd` · [ ] **F** — parent/diff + `HdImage` · [~] **G** — `Chd::info` ✅ + `ChdInfo`;
+  `verify` (needs a read-side SHA-1 dep) + rchdman + remaining docs pending.
 
 ## Session log
 
