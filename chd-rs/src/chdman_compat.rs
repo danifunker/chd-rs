@@ -1232,6 +1232,67 @@ fn cd_lzma_bit_exact_vs_chdman() {
     assert_cd_codec_bit_exact("cdlz", CodecType::LzmaCdV5);
 }
 
+/// `HdImage` diff cross-check: chd-rs writes sectors into an uncompressed diff over a chdman-made
+/// compressed parent, then **chdman `extracthd -ip parent`** reads the diff back — proving our diff
+/// (parent_sha1 link, 4-byte map, materialised hunks) is chdman-compatible and the merged image
+/// matches (parent with our sector writes overlaid).
+#[test]
+fn hd_image_diff_readable_by_chdman() {
+    use crate::hd::HdImage;
+
+    let chdman = chdman_path();
+    let dir = std::env::temp_dir();
+    let parent_in = dir.join("chdrs_hddiff_in.bin");
+    let parent_chd = dir.join("chdrs_hddiff_parent.chd");
+    let diff_chd = dir.join("chdrs_hddiff_diff.chd");
+    let merged = dir.join("chdrs_hddiff_merged.bin");
+
+    let img: Vec<u8> = (0..256 * 1024).map(|i| (i * 5 + 1) as u8).collect();
+    File::create(&parent_in).unwrap().write_all(&img).unwrap();
+
+    let s = Command::new(&chdman)
+        .arg("createhd")
+        .args(["-i".as_ref(), parent_in.as_os_str()])
+        .args(["-o".as_ref(), parent_chd.as_os_str()])
+        .args(["-c", "zlib"])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(s.success(), "chdman createhd (parent) failed");
+
+    let mut expected = img.clone();
+    {
+        let mut hd = HdImage::open_with_diff(&parent_chd, &diff_chd).unwrap();
+        let ss = hd.sector_size() as usize;
+        for &lba in &[3u64, 77, 313, 511] {
+            let pat = vec![(lba as u8) ^ 0xa5; ss];
+            hd.write_sector(lba, &pat).unwrap();
+            expected[lba as usize * ss..][..ss].copy_from_slice(&pat);
+        }
+        hd.flush().unwrap();
+    }
+
+    let s = Command::new(&chdman)
+        .arg("extracthd")
+        .args(["-i".as_ref(), diff_chd.as_os_str()])
+        .args(["-ip".as_ref(), parent_chd.as_os_str()])
+        .args(["-o".as_ref(), merged.as_os_str()])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(s.success(), "chdman extracthd of our diff failed");
+
+    assert_eq!(
+        std::fs::read(&merged).unwrap(),
+        expected,
+        "chdman-extracted diff differs from the expected merged image"
+    );
+
+    for p in [&parent_in, &parent_chd, &diff_chd, &merged] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// Build `pattern_ids.len()` hunks; hunks sharing a pattern id are byte-identical (forcing
 /// `COMPRESSION_SELF` refs). Pattern 0 is all-zeros; others are a distinct compressible sawtooth.
 fn build_hunks(hunk_size: usize, pattern_ids: &[u8]) -> Vec<u8> {

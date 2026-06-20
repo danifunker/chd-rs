@@ -641,6 +641,58 @@ pub(crate) fn write_uncompressed_inner<W: Write + Seek>(
     Ok(())
 }
 
+/// Write an **empty uncompressed diff** CHD: a V5 `compression = none` file whose 4-byte map is
+/// all zeros (every hunk reads from the parent) with `parent_sha1` set, plus the (cloned) metadata.
+/// No data hunks are written; the file ends padded to the first hunk-aligned offset so the runtime
+/// writer ([`crate::hd::HdImage`]) can append materialised hunks there. Layout matches an
+/// uncompressed CHD (`header → map → metadata → pad`), exactly what MAME's `create(.., parent)`
+/// produces for a diff and what its (and chd-rs's) reader expects.
+pub(crate) fn write_empty_diff<W: Write + Seek>(
+    out: &mut W,
+    logical_bytes: u64,
+    hunk_bytes: u32,
+    unit_bytes: u32,
+    parent_sha1: &[u8; 20],
+    metadata: &[MetaEntry],
+) -> Result<()> {
+    if hunk_bytes == 0 || unit_bytes == 0 || hunk_bytes % unit_bytes != 0 {
+        return Err(Error::InvalidParameter);
+    }
+    let hunk_bytes_u64 = hunk_bytes as u64;
+    let hunk_count = round_up(logical_bytes, hunk_bytes_u64) / hunk_bytes_u64;
+    let map_offset = V5_HEADER_SIZE as u64;
+    let map_size = hunk_count * 4;
+
+    let meta_start = map_offset + map_size;
+    let meta_blob = build_metadata_blob(metadata, meta_start);
+    let meta_offset = if meta_blob.is_empty() { 0 } else { meta_start };
+    let data_start = round_up(meta_start + meta_blob.len() as u64, hunk_bytes_u64);
+
+    let mut hdr = [0u8; V5_HEADER_SIZE as usize];
+    hdr[0..8].copy_from_slice(CHD_MAGIC);
+    hdr[8..12].copy_from_slice(&V5_HEADER_SIZE.to_be_bytes());
+    hdr[12..16].copy_from_slice(&5u32.to_be_bytes());
+    // compression[0..4] = 0 (none) — already zero
+    hdr[32..40].copy_from_slice(&logical_bytes.to_be_bytes());
+    hdr[40..48].copy_from_slice(&map_offset.to_be_bytes());
+    hdr[48..56].copy_from_slice(&meta_offset.to_be_bytes());
+    hdr[56..60].copy_from_slice(&hunk_bytes.to_be_bytes());
+    hdr[60..64].copy_from_slice(&unit_bytes.to_be_bytes());
+    // raw_sha1 (64) + sha1 (84) stay zero (uncompressed); parent_sha1 (104) links the parent.
+    hdr[104..124].copy_from_slice(parent_sha1);
+    out.write_all(&hdr)?;
+
+    // all-zero map: every hunk falls through to the parent until written.
+    out.write_all(&vec![0u8; map_size as usize])?;
+
+    out.write_all(&meta_blob)?;
+    let pad = data_start - (meta_start + meta_blob.len() as u64);
+    if pad > 0 {
+        out.write_all(&vec![0u8; pad as usize])?;
+    }
+    Ok(())
+}
+
 /// Read all of `reader` into memory and zero-pad to `logical_size` (or the read length if 0),
 /// validating `hunk_size`/`unit_size` and that the logical size is unit-aligned and ≥ the input.
 /// Shared by the `hd`/`dvd`/`copy` create paths (the in-memory writer needs the whole image).

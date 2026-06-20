@@ -20,8 +20,8 @@ use crate::metadata::Metadata;
 use crate::read::ChdReader;
 use crate::{write, Chd, CompressionProgress};
 use std::convert::TryInto;
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Cylinder/head/sector geometry plus bytes-per-sector — the data behind a `GDDD` record.
@@ -360,6 +360,289 @@ pub fn extract_to_path(
     Ok(())
 }
 
+/// Read a 4-byte big-endian field from a header buffer.
+fn be32(b: &[u8], off: usize) -> u32 {
+    u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+}
+
+/// A read/write **block-device view** over an uncompressed hard-disk CHD — the surface MAME's
+/// `harddisk_image_device` exposes to a running machine. Backs per-sector [`read_sector`]/
+/// [`write_sector`] (and whole-hunk reads) onto an uncompressed V5 CHD, optionally with a
+/// (compressed) **parent**: unwritten hunks fall through to the parent, and writes materialise the
+/// affected hunk into the diff and rewrite its map entry.
+///
+/// Matches libchdman-rs's `HdImage`. chd-rs's [`Chd`] is read-only, so `HdImage` holds the diff/child
+/// as a raw read-write file plus an in-memory copy of the 4-byte map, and keeps the parent open as a
+/// read-only [`Chd`] for fall-through reads.
+///
+/// [`read_sector`]: HdImage::read_sector
+/// [`write_sector`]: HdImage::write_sector
+pub struct HdImage {
+    file: File,
+    parent: Option<Box<Chd<BufReader<File>>>>,
+    /// 4-byte map entries (`offset / hunk_bytes`; `0` = read from parent / zero-fill).
+    map: Vec<u32>,
+    geometry: HdGeometry,
+    hunk_bytes: u32,
+    logical_bytes: u64,
+    comp_buf: Vec<u8>,
+    hunk_buf: Vec<u8>,
+}
+
+const V5_HEADER_LEN: usize = 124;
+
+impl HdImage {
+    /// Open an **uncompressed** HD CHD read-write for in-place sector edits. Fails with
+    /// [`Error::UnsupportedFormat`] if the CHD is compressed (MAME also rejects compressed write
+    /// targets) or [`Error::MetadataNotFound`] if it has no `GDDD` geometry record.
+    pub fn open(path: &Path) -> Result<Self> {
+        // Probe read-only for header fields + geometry.
+        let mut probe = Chd::open(BufReader::new(File::open(path).map_err(Error::from)?), None)?;
+        if probe.header().compression()[0] != 0 {
+            return Err(Error::UnsupportedFormat);
+        }
+        let geometry = read_geometry(&mut probe)?;
+        let logical_bytes = probe.header().logical_bytes();
+        let hunk_bytes = probe.header().hunk_size();
+        let hunk_count = probe.header().hunk_count();
+        drop(probe);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(Error::from)?;
+        let map = Self::read_map(&mut file, hunk_count)?;
+        Ok(Self::assemble(
+            file,
+            None,
+            map,
+            geometry,
+            hunk_bytes,
+            logical_bytes,
+        ))
+    }
+
+    /// Open `parent_path` read-only and create a fresh **uncompressed diff** at `diff_path` whose
+    /// every hunk initially falls through to the parent; subsequent writes land in the diff. This is
+    /// MAME's runtime strategy for writing to a compressed image. The parent's metadata is cloned
+    /// into the diff (so geometry is available), and `diff_path` is created fresh (overwritten).
+    pub fn open_with_diff(parent_path: &Path, diff_path: &Path) -> Result<Self> {
+        {
+            let mut parent = Chd::open(
+                BufReader::new(File::open(parent_path).map_err(Error::from)?),
+                None,
+            )?;
+            let logical = parent.header().logical_bytes();
+            let hunk = parent.header().hunk_size();
+            let unit = parent.header().unit_bytes();
+            let parent_sha1 = parent.header().sha1().unwrap_or([0u8; 20]);
+            if parent_sha1 == [0u8; 20] {
+                // A V5 child keys its parent by the parent's overall SHA-1; an uncompressed parent
+                // has none, so it can't be referenced as a diff parent.
+                return Err(Error::UnsupportedFormat);
+            }
+            let metas: Vec<Metadata> = parent.metadata_refs().try_into()?;
+            let entries: Vec<write::MetaEntry> = metas
+                .iter()
+                .map(|m| write::MetaEntry {
+                    tag: m.metatag,
+                    flags: m.flags,
+                    payload: &m.value,
+                })
+                .collect();
+            let mut out = File::create(diff_path).map_err(Error::from)?;
+            write::write_empty_diff(&mut out, logical, hunk, unit, &parent_sha1, &entries)?;
+        }
+        Self::reopen_diff(parent_path, diff_path)
+    }
+
+    /// Re-open a previously-created diff against its parent. The returned `HdImage` keeps the parent
+    /// open for its whole lifetime (unwritten hunks read through it).
+    pub fn reopen_diff(parent_path: &Path, diff_path: &Path) -> Result<Self> {
+        // Probe the diff with its parent (validates `parent_sha1`) for header fields + geometry.
+        let geometry;
+        let logical_bytes;
+        let hunk_bytes;
+        let hunk_count;
+        {
+            let parent = Chd::open(
+                BufReader::new(File::open(parent_path).map_err(Error::from)?),
+                None,
+            )?;
+            let mut probe = Chd::open(
+                BufReader::new(File::open(diff_path).map_err(Error::from)?),
+                Some(Box::new(parent)),
+            )?;
+            if probe.header().compression()[0] != 0 {
+                return Err(Error::UnsupportedFormat);
+            }
+            logical_bytes = probe.header().logical_bytes();
+            hunk_bytes = probe.header().hunk_size();
+            hunk_count = probe.header().hunk_count();
+            geometry = read_geometry(&mut probe)?;
+        }
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(diff_path)
+            .map_err(Error::from)?;
+        let map = Self::read_map(&mut file, hunk_count)?;
+        let parent = Chd::open(
+            BufReader::new(File::open(parent_path).map_err(Error::from)?),
+            None,
+        )?;
+        Ok(Self::assemble(
+            file,
+            Some(Box::new(parent)),
+            map,
+            geometry,
+            hunk_bytes,
+            logical_bytes,
+        ))
+    }
+
+    fn read_map(file: &mut File, hunk_count: u32) -> Result<Vec<u32>> {
+        let mut raw = vec![0u8; hunk_count as usize * 4];
+        file.seek(SeekFrom::Start(V5_HEADER_LEN as u64))
+            .map_err(Error::from)?;
+        file.read_exact(&mut raw).map_err(Error::from)?;
+        Ok(raw.chunks_exact(4).map(|c| be32(c, 0)).collect())
+    }
+
+    fn assemble(
+        file: File,
+        parent: Option<Box<Chd<BufReader<File>>>>,
+        map: Vec<u32>,
+        geometry: HdGeometry,
+        hunk_bytes: u32,
+        logical_bytes: u64,
+    ) -> Self {
+        HdImage {
+            file,
+            parent,
+            map,
+            geometry,
+            hunk_bytes,
+            logical_bytes,
+            comp_buf: Vec::new(),
+            hunk_buf: vec![0u8; hunk_bytes as usize],
+        }
+    }
+
+    /// Parsed `GDDD` geometry (cylinders / heads / sectors / bytes-per-sector).
+    pub fn geometry(&self) -> HdGeometry {
+        self.geometry
+    }
+
+    /// Bytes per sector.
+    pub fn sector_size(&self) -> u32 {
+        self.geometry.sector_bytes
+    }
+
+    /// Total addressable sectors (`logical_bytes / sector_size`). Valid LBAs are `0..sector_count()`.
+    pub fn sector_count(&self) -> u64 {
+        self.logical_bytes / u64::from(self.geometry.sector_bytes)
+    }
+
+    /// Read one sector at logical block address `lba` into `buf` (must be exactly
+    /// [`sector_size`](Self::sector_size) bytes).
+    pub fn read_sector(&mut self, lba: u64, buf: &mut [u8]) -> Result<()> {
+        let ss = self.geometry.sector_bytes as usize;
+        if buf.len() != ss || lba >= self.sector_count() {
+            return Err(Error::InvalidParameter);
+        }
+        let byte = lba * ss as u64;
+        let hunk = (byte / self.hunk_bytes as u64) as u32;
+        let off = (byte % self.hunk_bytes as u64) as usize;
+        let mut hunk_buf = std::mem::take(&mut self.hunk_buf);
+        let res = self.read_hunk(hunk, &mut hunk_buf);
+        if res.is_ok() {
+            buf.copy_from_slice(&hunk_buf[off..off + ss]);
+        }
+        self.hunk_buf = hunk_buf;
+        res
+    }
+
+    /// Write one sector at `lba` from `buf` (must be exactly [`sector_size`](Self::sector_size)
+    /// bytes). Materialises the affected hunk into the diff if it was a parent reference.
+    pub fn write_sector(&mut self, lba: u64, buf: &[u8]) -> Result<()> {
+        let ss = self.geometry.sector_bytes as usize;
+        if buf.len() != ss || lba >= self.sector_count() {
+            return Err(Error::InvalidParameter);
+        }
+        let byte = lba * ss as u64;
+        let hunk = (byte / self.hunk_bytes as u64) as u32;
+        let off = (byte % self.hunk_bytes as u64) as usize;
+
+        let mut hunk_buf = std::mem::take(&mut self.hunk_buf);
+        let res = match self.read_hunk(hunk, &mut hunk_buf) {
+            Ok(()) => {
+                hunk_buf[off..off + ss].copy_from_slice(buf);
+                self.write_hunk(hunk, &hunk_buf)
+            }
+            Err(e) => Err(e),
+        };
+        self.hunk_buf = hunk_buf;
+        res
+    }
+
+    /// Read whole hunk `hunk` into `dest` (`hunk_bytes` long): from the diff if materialised, else
+    /// the parent, else zeros.
+    fn read_hunk(&mut self, hunk: u32, dest: &mut [u8]) -> Result<()> {
+        let entry = self.map[hunk as usize];
+        if entry != 0 {
+            self.file
+                .seek(SeekFrom::Start(entry as u64 * self.hunk_bytes as u64))
+                .map_err(Error::from)?;
+            self.file.read_exact(dest).map_err(Error::from)?;
+        } else if let Some(parent) = self.parent.as_deref_mut() {
+            let mut comp = std::mem::take(&mut self.comp_buf);
+            let res = parent
+                .hunk(hunk)
+                .and_then(|mut h| h.read_hunk_in(&mut comp, dest));
+            self.comp_buf = comp;
+            res?;
+        } else {
+            dest.fill(0);
+        }
+        Ok(())
+    }
+
+    /// Write whole hunk `hunk` (`hunk_bytes` long), materialising it (appending a fresh hunk-aligned
+    /// block + updating the map entry) if it was a parent reference, else overwriting in place.
+    fn write_hunk(&mut self, hunk: u32, data: &[u8]) -> Result<()> {
+        let entry = self.map[hunk as usize];
+        let offset = if entry != 0 {
+            entry as u64 * self.hunk_bytes as u64
+        } else {
+            // Append at EOF (which stays hunk-aligned: the data region starts aligned and every
+            // appended hunk is exactly hunk_bytes), then record the new map entry on disk.
+            let eof = self.file.seek(SeekFrom::End(0)).map_err(Error::from)?;
+            let new_entry = (eof / self.hunk_bytes as u64) as u32;
+            self.map[hunk as usize] = new_entry;
+            self.file
+                .seek(SeekFrom::Start(V5_HEADER_LEN as u64 + hunk as u64 * 4))
+                .map_err(Error::from)?;
+            self.file
+                .write_all(&new_entry.to_be_bytes())
+                .map_err(Error::from)?;
+            eof
+        };
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .map_err(Error::from)?;
+        self.file.write_all(data).map_err(Error::from)?;
+        Ok(())
+    }
+
+    /// Flush buffered writes to disk.
+    pub fn flush(&mut self) -> Result<()> {
+        self.file.flush().map_err(Error::from)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +667,74 @@ mod tests {
         assert!(compute_chs(0, 512).is_err());
         assert!(compute_chs(1000, 0).is_err());
         assert!(compute_chs(513, 512).is_err()); // not sector-aligned
+    }
+
+    /// `HdImage` diff round-trip: against a compressed parent, written sectors persist in the diff,
+    /// unwritten sectors fall through to the parent, and a reopen sees the same image.
+    #[test]
+    fn hd_image_diff_roundtrip() {
+        let dir = std::env::temp_dir();
+        let parent_in = dir.join("chdrs_hdimg_parent.bin");
+        let parent_chd = dir.join("chdrs_hdimg_parent.chd");
+        let diff_chd = dir.join("chdrs_hdimg_diff.chd");
+
+        // 256 KiB deterministic image → compressed (zlib) parent with a GDDD record.
+        let img: Vec<u8> = (0..256 * 1024).map(|i| (i * 7 + 3) as u8).collect();
+        std::fs::write(&parent_in, &img).unwrap();
+        create_from_path(
+            &parent_in,
+            &parent_chd,
+            HdCreateOptions {
+                codecs: [crate::CHD_CODEC_ZLIB, 0, 0, 0],
+                ..Default::default()
+            },
+            &mut |_| {},
+            &|| false,
+        )
+        .unwrap();
+
+        // Expected merged image: parent with the written sectors overlaid.
+        let mut expected = img.clone();
+        let written: [u64; 4] = [5, 100, 200, 511];
+
+        {
+            let mut hd = HdImage::open_with_diff(&parent_chd, &diff_chd).unwrap();
+            let ss = hd.sector_size() as usize;
+            assert_eq!(ss, 512);
+            assert_eq!(hd.sector_count(), 512);
+            for &lba in &written {
+                let pat = vec![(lba as u8).wrapping_mul(3).wrapping_add(1); ss];
+                hd.write_sector(lba, &pat).unwrap();
+                expected[lba as usize * ss..][..ss].copy_from_slice(&pat);
+            }
+            hd.flush().unwrap();
+
+            // written sector reads back; an unwritten one falls through to the parent.
+            let mut buf = vec![0u8; ss];
+            hd.read_sector(5, &mut buf).unwrap();
+            assert_eq!(buf, expected[5 * ss..6 * ss]);
+            hd.read_sector(50, &mut buf).unwrap();
+            assert_eq!(
+                buf,
+                img[50 * ss..51 * ss],
+                "unwritten sector should read the parent"
+            );
+        }
+
+        // reopen and verify the whole image (written persisted + parent fall-through).
+        {
+            let mut hd = HdImage::reopen_diff(&parent_chd, &diff_chd).unwrap();
+            let ss = hd.sector_size() as usize;
+            let mut buf = vec![0u8; ss];
+            for lba in 0..hd.sector_count() {
+                hd.read_sector(lba, &mut buf).unwrap();
+                assert_eq!(buf, expected[lba as usize * ss..][..ss], "sector {lba}");
+            }
+        }
+
+        for p in [&parent_in, &parent_chd, &diff_chd] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]
