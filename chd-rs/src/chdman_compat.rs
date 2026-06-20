@@ -1130,6 +1130,108 @@ fn info_reports_hd_and_dvd() {
     let _ = std::fs::remove_file(&dvd_chd);
 }
 
+/// Per-hunk byte-identity for a **CD wrapper codec**: build a MODE1/2352 BIN+CUE (valid sync+ECC,
+/// so the codec exercises the ECC-strip path), `chdman createcd -c <mnemonic>`, then for every hunk
+/// chdman compressed with the codec, decode it (chd-rs restores sync+ECC + subcode), re-encode with
+/// our `CdEncoder`, and assert the stored bytes match.
+#[cfg(all(feature = "want_raw_data_sector", feature = "want_subcode"))]
+fn assert_cd_codec_bit_exact(mnemonic: &str, codec: CodecType) {
+    use crate::cdrom::{CD_MAX_SECTOR_DATA, CD_MODE_OFFSET, CD_SYNC_HEADER};
+    use crate::compression::ecc::ErrorCorrectedSector;
+
+    let chdman = chdman_path();
+    let dir = std::env::temp_dir();
+    let bin_path = dir.join(format!("chdrs_cd_{mnemonic}.bin"));
+    let cue_path = dir.join(format!("chdrs_cd_{mnemonic}.cue"));
+    let chd_path = dir.join(format!("chdrs_cd_{mnemonic}.chd"));
+
+    // 64 MODE1 sectors (8 frames/hunk → 8 full hunks). Compressible payload (via make_input) +
+    // a freshly-generated valid P/Q ECC so chdman's codec strips the sync header + ECC.
+    let nsectors = 64usize;
+    let mut bin = make_input(nsectors * CD_MAX_SECTOR_DATA as usize);
+    for s in 0..nsectors {
+        let sector = &mut bin[s * CD_MAX_SECTOR_DATA as usize..][..CD_MAX_SECTOR_DATA as usize];
+        sector[..CD_SYNC_HEADER.len()].copy_from_slice(&CD_SYNC_HEADER);
+        sector[CD_MODE_OFFSET] = 1; // MODE1
+        let mut sec = <&mut [u8; CD_MAX_SECTOR_DATA as usize]>::try_from(&mut sector[..]).unwrap();
+        sec.generate_ecc();
+    }
+    File::create(&bin_path).unwrap().write_all(&bin).unwrap();
+
+    let bin_name = bin_path.file_name().unwrap().to_str().unwrap();
+    let cue = format!("FILE \"{bin_name}\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n");
+    File::create(&cue_path)
+        .unwrap()
+        .write_all(cue.as_bytes())
+        .unwrap();
+
+    let status = Command::new(&chdman)
+        .arg("createcd")
+        .arg("-i")
+        .arg(&cue_path)
+        .arg("-o")
+        .arg(&chd_path)
+        .args(["-c", mnemonic])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(status.success(), "chdman createcd -c {mnemonic} failed");
+
+    let mut chd = Chd::open(BufReader::new(File::open(&chd_path).unwrap()), None).unwrap();
+    let hunk_count = chd.header().hunk_count();
+    let hunk_size = chd.header().hunk_size();
+
+    let mut comp_buf = Vec::new();
+    let mut decoded = chd.get_hunksized_buffer();
+    let mut stored = Vec::new();
+    let mut checked = 0usize;
+    for n in 0..hunk_count {
+        let is_codec0 = matches!(
+            chd.map().get_entry(n as usize),
+            Some(MapEntry::V5Compressed(e))
+                if matches!(e.hunk_type(), Ok(CompressionTypeV5::CompressionType0))
+        );
+        if !is_codec0 {
+            continue;
+        }
+        {
+            let mut hunk = chd.hunk(n).unwrap();
+            hunk.read_hunk_in(&mut comp_buf, &mut decoded).unwrap();
+            hunk.read_raw_in(&mut stored).unwrap();
+        }
+        let mut enc = codec.init_encoder(hunk_size).unwrap();
+        let mut mine = vec![0u8; hunk_size as usize];
+        let n_enc = enc.compress(&decoded, &mut mine).unwrap();
+        assert_eq!(
+            &mine[..n_enc],
+            &stored[..],
+            "cd codec {mnemonic}: hunk {n} ({n_enc} bytes) differs from chdman ({} bytes)",
+            stored.len()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no hunks used codec {mnemonic}; test is vacuous"
+    );
+
+    let _ = std::fs::remove_file(&bin_path);
+    let _ = std::fs::remove_file(&cue_path);
+    let _ = std::fs::remove_file(&chd_path);
+}
+
+#[cfg(all(feature = "want_raw_data_sector", feature = "want_subcode"))]
+#[test]
+fn cd_zlib_bit_exact_vs_chdman() {
+    assert_cd_codec_bit_exact("cdzl", CodecType::ZLibCdV5);
+}
+
+#[cfg(all(feature = "want_raw_data_sector", feature = "want_subcode"))]
+#[test]
+fn cd_lzma_bit_exact_vs_chdman() {
+    assert_cd_codec_bit_exact("cdlz", CodecType::LzmaCdV5);
+}
+
 /// Build `pattern_ids.len()` hunks; hunks sharing a pattern id are byte-identical (forcing
 /// `COMPRESSION_SELF` refs). Pattern 0 is all-zeros; others are a distinct compressible sawtooth.
 fn build_hunks(hunk_size: usize, pattern_ids: &[u8]) -> Vec<u8> {

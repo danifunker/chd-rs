@@ -140,8 +140,15 @@ impl CodecType {
             CodecType::FlacV5 => {
                 RawFlacEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
             }
+            CodecType::ZLibCdV5 => crate::compression::codecs::CdZlibEncoder::new(hunk_size)
+                .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
+            CodecType::LzmaCdV5 => crate::compression::codecs::CdLzmaEncoder::new(hunk_size)
+                .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
             #[cfg(feature = "write-zstd")]
             CodecType::ZstdV5 => crate::compression::codecs::ZstdEncoder::new(hunk_size)
+                .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
+            #[cfg(feature = "write-zstd")]
+            CodecType::ZstdCdV5 => crate::compression::codecs::CdZstdEncoder::new(hunk_size)
                 .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
             _ => Err(Error::UnsupportedFormat),
         }

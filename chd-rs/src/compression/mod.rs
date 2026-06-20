@@ -4,7 +4,9 @@ use std::ops::{Add, AddAssign};
 
 mod avhuff;
 mod cdrom;
-mod ecc;
+// `pub(crate)` so the dev-only chdman_compat tests can synthesize valid MODE1 sectors
+// (sync + ECC) when building CD test images. The trait inside is already `pub(crate)`.
+pub(crate) mod ecc;
 mod flac;
 mod huff;
 mod lzma;
@@ -38,6 +40,19 @@ pub mod codecs {
     pub use crate::compression::zlib::ZlibEncoder;
     #[cfg(feature = "write-zstd")]
     pub use crate::compression::zstd::ZstdEncoder;
+
+    // CD wrapper encoders (encode mirror of CdLzmaCodec/CdZlibCodec/CdZstdCodec).
+    #[cfg(feature = "write")]
+    pub use crate::compression::cdrom::CdEncoder;
+    /// CD Deflate (`cdzl`) compression codec: zlib sectors + zlib subcode.
+    #[cfg(feature = "write")]
+    pub type CdZlibEncoder = CdEncoder<ZlibEncoder, ZlibEncoder>;
+    /// CD LZMA (`cdlz`) compression codec: LZMA sectors + zlib subcode.
+    #[cfg(feature = "write")]
+    pub type CdLzmaEncoder = CdEncoder<LzmaEncoder, ZlibEncoder>;
+    /// CD Zstandard (`cdzs`) compression codec: zstd sectors + zstd subcode.
+    #[cfg(feature = "write-zstd")]
+    pub type CdZstdEncoder = CdEncoder<ZstdEncoder, ZstdEncoder>;
 }
 
 // unstable(trait_alias)

@@ -1,5 +1,7 @@
 /// Common logic for CD-ROM decompression codecs.
-use crate::cdrom::{CD_FRAME_SIZE, CD_MAX_SECTOR_DATA, CD_MAX_SUBCODE_DATA, CD_SYNC_HEADER};
+use crate::cdrom::{
+    CD_FRAME_SIZE, CD_MAX_SECTOR_DATA, CD_MAX_SUBCODE_DATA, CD_SYNC_HEADER, CD_SYNC_NUM_BYTES,
+};
 use crate::compression::ecc::ErrorCorrectedSector;
 use crate::compression::lzma::LzmaCodec;
 use crate::compression::zlib::ZlibCodec;
@@ -252,5 +254,202 @@ impl<Engine: CodecImplementation, SubEngine: CodecImplementation> CodecImplement
         }
 
         Ok(frame_res + sub_res)
+    }
+}
+
+/// CD-ROM wrapper **compression** codec — the encode mirror of [`CdCodec`]. Generic over the
+/// sector engine `Engine` and subcode engine `SubEngine` (both [`CodecEncodeImplementation`]).
+///
+/// Reproduces MAME's `chd_cd_compressor::compress` (`chdcodec.cpp:351`): de-swizzles the hunk's
+/// interleaved `[sector(2352) ‖ subcode(96)]` frames into a sector run followed by a subcode run;
+/// for every frame that is a verifiable data sector (sync header present **and** valid ECC) it sets
+/// that frame's bit in the ECC-flag bitmap and zeroes the sync header + ECC P/Q (regenerated on
+/// decode); compresses the sector run with `Engine` and the subcode run with `SubEngine`; and emits
+/// `[ecc_flags ‖ complen ‖ sector_stream ‖ subcode_stream]` where `complen` (the sector stream
+/// length) is 2 bytes when the hunk is `< 65536` else 3. Returns [`Error::CompressionError`] if the
+/// sector stream alone is not smaller than the hunk (MAME's `complen >= srclen` check).
+#[cfg(feature = "write")]
+pub struct CdEncoder<Engine, SubEngine> {
+    engine: Engine,
+    sub_engine: SubEngine,
+    buffer: Vec<u8>,
+}
+
+#[cfg(feature = "write")]
+impl<Engine, SubEngine> crate::compression::CodecEncodeImplementation
+    for CdEncoder<Engine, SubEngine>
+where
+    Engine: crate::compression::CodecEncodeImplementation,
+    SubEngine: crate::compression::CodecEncodeImplementation,
+{
+    fn new(hunk_size: u32) -> Result<Self> {
+        if hunk_size % CD_FRAME_SIZE != 0 {
+            return Err(Error::CodecError);
+        }
+        let frames = hunk_size / CD_FRAME_SIZE;
+        Ok(CdEncoder {
+            engine: Engine::new(frames * CD_MAX_SECTOR_DATA)?,
+            sub_engine: SubEngine::new(frames * CD_MAX_SUBCODE_DATA)?,
+            buffer: vec![0u8; (frames * (CD_MAX_SECTOR_DATA + CD_MAX_SUBCODE_DATA)) as usize],
+        })
+    }
+
+    fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize> {
+        let frames = input.len() / CD_FRAME_SIZE as usize;
+        let complen_bytes = if input.len() < 65536 { 2 } else { 3 };
+        let ecc_bytes = frames.div_ceil(8);
+        let header_bytes = ecc_bytes + complen_bytes;
+        let sect_total = frames * CD_MAX_SECTOR_DATA as usize;
+        let sub_total = frames * CD_MAX_SUBCODE_DATA as usize;
+
+        // de-swizzle [sector ‖ subcode] frames into the sector run then the subcode run
+        for f in 0..frames {
+            let src = &input[f * CD_FRAME_SIZE as usize..];
+            self.buffer[f * CD_MAX_SECTOR_DATA as usize..][..CD_MAX_SECTOR_DATA as usize]
+                .copy_from_slice(&src[..CD_MAX_SECTOR_DATA as usize]);
+            self.buffer[sect_total + f * CD_MAX_SUBCODE_DATA as usize..]
+                [..CD_MAX_SUBCODE_DATA as usize]
+                .copy_from_slice(
+                    &src[CD_MAX_SECTOR_DATA as usize..][..CD_MAX_SUBCODE_DATA as usize],
+                );
+        }
+
+        // strip the sync header + ECC of verifiable data sectors, recording which in the bitmap
+        let mut ecc_flags = vec![0u8; ecc_bytes];
+        for f in 0..frames {
+            let off = f * CD_MAX_SECTOR_DATA as usize;
+            let mut sector = <&mut [u8; CD_MAX_SECTOR_DATA as usize]>::try_from(
+                &mut self.buffer[off..off + CD_MAX_SECTOR_DATA as usize],
+            )?;
+            if sector[..CD_SYNC_NUM_BYTES] == CD_SYNC_HEADER && sector.verify_ecc() {
+                ecc_flags[f / 8] |= 1 << (f % 8);
+                sector[..CD_SYNC_NUM_BYTES].fill(0);
+                sector.clear_ecc();
+            }
+        }
+
+        // compress the sector run after the header; bail (NONE fallback) if it doesn't shrink
+        let base_n = self
+            .engine
+            .compress(&self.buffer[..sect_total], &mut output[header_bytes..])?;
+        if base_n >= input.len() {
+            return Err(Error::CompressionError);
+        }
+
+        // compress the subcode run after the sector stream
+        let sub_n = self.sub_engine.compress(
+            &self.buffer[sect_total..sect_total + sub_total],
+            &mut output[header_bytes + base_n..],
+        )?;
+
+        // header: ECC-flag bitmap followed by the sector-stream length (BE, 2 or 3 bytes)
+        output[..ecc_bytes].copy_from_slice(&ecc_flags);
+        if complen_bytes > 2 {
+            output[ecc_bytes] = (base_n >> 16) as u8;
+            output[ecc_bytes + 1] = (base_n >> 8) as u8;
+            output[ecc_bytes + 2] = base_n as u8;
+        } else {
+            output[ecc_bytes] = (base_n >> 8) as u8;
+            output[ecc_bytes + 1] = base_n as u8;
+        }
+
+        Ok(header_bytes + base_n + sub_n)
+    }
+}
+
+#[cfg(feature = "write")]
+impl<Engine, SubEngine> crate::compression::CompressionEncoder for CdEncoder<Engine, SubEngine>
+where
+    Engine: crate::compression::CodecEncodeImplementation + Send + Sync,
+    SubEngine: crate::compression::CodecEncodeImplementation + Send + Sync,
+{
+}
+
+#[cfg(all(
+    test,
+    feature = "write",
+    feature = "want_raw_data_sector",
+    feature = "want_subcode"
+))]
+mod cd_encode_tests {
+    use super::{CdEncoder, CdLzmaCodec, CdZlibCodec};
+    use crate::cdrom::{CD_FRAME_SIZE, CD_MAX_SECTOR_DATA, CD_MODE_OFFSET, CD_SYNC_HEADER};
+    use crate::compression::ecc::ErrorCorrectedSector;
+    use crate::compression::lzma::LzmaEncoder;
+    use crate::compression::zlib::ZlibEncoder;
+    use crate::compression::{CodecEncodeImplementation, CodecImplementation};
+
+    /// A CD hunk of `frames` 2448-byte frames. Even frames are MODE1 data sectors (sync header +
+    /// freshly-generated valid P/Q ECC, so the encoder strips them); odd frames are audio (no sync,
+    /// stored verbatim). Subcode is pseudo-random.
+    fn build_cd_hunk(frames: usize) -> Vec<u8> {
+        let mut x: u32 = 0x9e37_79b9;
+        let mut rng = move || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x & 0xff) as u8
+        };
+        let mut hunk = vec![0u8; frames * CD_FRAME_SIZE as usize];
+        for f in 0..frames {
+            let frame = &mut hunk[f * CD_FRAME_SIZE as usize..][..CD_FRAME_SIZE as usize];
+            let (sector, subcode) = frame.split_at_mut(CD_MAX_SECTOR_DATA as usize);
+            if f % 2 == 0 {
+                sector[..CD_SYNC_HEADER.len()].copy_from_slice(&CD_SYNC_HEADER);
+                sector[CD_MODE_OFFSET] = 1; // MODE1
+                for b in &mut sector[16..] {
+                    *b = rng();
+                }
+                // overwrite the P/Q ECC area with valid codes so the encoder strips this sector
+                let mut s =
+                    <&mut [u8; CD_MAX_SECTOR_DATA as usize]>::try_from(&mut sector[..]).unwrap();
+                s.generate_ecc();
+            } else {
+                for b in sector.iter_mut() {
+                    *b = rng();
+                }
+            }
+            for b in subcode.iter_mut() {
+                *b = rng();
+            }
+        }
+        hunk
+    }
+
+    fn roundtrip<E, S, D>(mut enc: CdEncoder<E, S>, mut dec: D, hunk_size: u32)
+    where
+        E: CodecEncodeImplementation,
+        S: CodecEncodeImplementation,
+        D: CodecImplementation,
+    {
+        let hunk = build_cd_hunk((hunk_size / CD_FRAME_SIZE) as usize);
+        let mut comp = vec![0u8; hunk_size as usize];
+        let n = enc.compress(&hunk, &mut comp).unwrap();
+        assert!(n < hunk.len(), "expected the CD hunk to shrink");
+
+        let mut out = vec![0u8; hunk_size as usize];
+        let res = dec.decompress(&comp[..n], &mut out).unwrap();
+        assert_eq!(res.total_out(), hunk_size as usize);
+        assert_eq!(out, hunk, "CD codec round-trip mismatch");
+    }
+
+    #[test]
+    fn cd_zlib_roundtrips() {
+        let hs = 8 * CD_FRAME_SIZE;
+        roundtrip::<ZlibEncoder, ZlibEncoder, _>(
+            CdEncoder::new(hs).unwrap(),
+            CdZlibCodec::new(hs).unwrap(),
+            hs,
+        );
+    }
+
+    #[test]
+    fn cd_lzma_roundtrips() {
+        let hs = 8 * CD_FRAME_SIZE;
+        roundtrip::<LzmaEncoder, ZlibEncoder, _>(
+            CdEncoder::new(hs).unwrap(),
+            CdLzmaCodec::new(hs).unwrap(),
+            hs,
+        );
     }
 }
