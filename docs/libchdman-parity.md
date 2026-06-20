@@ -32,11 +32,12 @@ and [docs/chdman-mapping.md](../../libchdman-rs/docs/chdman-mapping.md).
 - **`dvd` module** (public): `dvd::create_from_*`/`extract_to_*` + `DvdCreateOptions`, byte-identical
   to `chdman createdvd`.
 
-**Done (cont.):** **`cd` createcd** — `cd::create_from_cue`/`create_from_iso` + the CUE/ISO TOC
-parser + CHT2 metadata, byte-identical to `chdman createcd`.
+**Done (cont.):** **`cd` createcd + extractcd** — `cd::create_from_cue`/`create_from_iso` (CUE/ISO
+TOC parser + CHT2) and `cd::extract_to_cue` + `list_tracks`/`TrackInfo`, all byte-identical to
+`chdman createcd`/`extractcd` (all four codecs encode; `cdfl` glibc-gated).
 
-**Left:** `extractcd` + the rest of `cd` (GDI/Nero, `list_tracks`, `CdCookedReader`); `verify`;
-parent/diff + runtime writes; remaining docs. Everything below.
+**Left:** the rest of `cd` (GDI/Nero parsing, `.gdi`/split-bin + `extract_to_iso`, `CdCookedReader`);
+`verify`; parent/diff + runtime writes; remaining docs. Everything below.
 
 ---
 
@@ -123,10 +124,11 @@ wrapper) · ⬜ to build.
 | libchdman-rs | chd-rs target | status | notes |
 | --- | --- | --- | --- |
 | `CdCreateOptions{hunk_size,codecs}` (default 19584, `[cdlz,cdzl,cdfl,0]`) | `cd::CdCreateOptions` | ✅ | done; default matches and works (all of `cdlz`/`cdzl`/`cdfl` encode — `cdfl` byte-identical to a glibc chdman, libm-gated). |
-| `TrackType`/`SubcodeType`/`TrackInfo` | `cd::TrackType`/`cd::SubcodeType` | ✅/⬜ | enums done (+ `type_string`/`subtype_string`); `TrackInfo`/`list_tracks` (read CHT2) still ⬜. |
+| `TrackType`/`SubcodeType`/`TrackInfo` | `cd::TrackType`/`cd::SubcodeType`/`cd::TrackInfo` | ✅ | done (+ `type_string`/`subtype_string`); `TrackInfo` returned by `list_tracks`. |
 | `create_from_cue/create_from_iso` | `cd::create_from_cue`/`create_from_iso` | ✅ | done & **byte-identical to `chdman createcd`** (`-c cdzl`/`cdlz`): pure-Rust CUE (`parse_cue`) + ISO (`parse_iso`) parser, 2448-frame assembly (port of `chd_cd_compressor::read_data`), CHT2 metadata. GDI/Nero/WAVE/GD-ROM not yet. |
-| `list_tracks(chd)` | new (read CHT2 metadata) | ⬜ | |
-| `extract_to_cue/extract_to_iso/extract_to_gdi` | new | ⬜ | |
+| `list_tracks(chd)` | `cd::list_tracks(&mut Chd)` | ✅ | done; reads `CHT2`/`CHTR` (port of `parse_metadata`). Takes `&mut Chd` (chd-rs reads metadata mutably). |
+| `extract_to_cue` | `cd::extract_to_cue` | ✅ | done & **byte-identical to `chdman extractcd`** (cue **and** bin), single + multi-track. Cue line endings match the host platform (CRLF on Windows, LF on Linux), like chdman. |
+| `extract_to_iso/extract_to_gdi` | new | ⬜ | `.gdi`/split-bin + single-track `.iso` extraction. |
 | `CdCookedReader` (+`open`/`open_track`/`Read+Seek`) | new | ⬜ | 2048-byte cooked stream over MODE1 tracks. |
 
 ### 3.5 `dvd` module
@@ -182,8 +184,10 @@ Ordered by dependency; maps onto PARITY_PLAN M3–M8.
   byte-identical; **`cdfl`** (`CdFlacEncoder`) byte-identical to a glibc chdman (libm-gated, like raw
   `flac`). **`createcd` container** ✅ DONE — `cd::create_from_cue`/`create_from_iso` (pure-Rust
   CUE+ISO TOC parser, 2448-frame assembly, CHT2 metadata) are **byte-identical to `chdman createcd`**
-  (single MODE1/2352, multi-track MODE1+AUDIO+pregap, flat ISO, all four codecs). Remaining:
-  `extractcd` + `extract_to_{cue,iso,gdi}`, GDI/Nero parsing, `list_tracks`, `CdCookedReader`.
+  (single MODE1/2352, multi-track MODE1+AUDIO+pregap, flat ISO, all four codecs). **`extractcd`** ✅
+  DONE — `cd::extract_to_cue` + `list_tracks`/`TrackInfo`, **byte-identical to `chdman extractcd`**
+  (cue + bin) with a full create→extract round-trip. Remaining: GDI/Nero parsing,
+  `.gdi`/split-bin + `extract_to_iso`, `CdCookedReader`.
 - **Phase F — parent/diff + `HdImage`.** Uncompressed diff children vs a compressed parent
   (parent-hunk dedup lights up here — the driver hook exists), runtime `read_sector`/`write_sector`,
   `write_hunk`/`write_bytes` equivalents.

@@ -28,7 +28,7 @@ GDDD/IDNT). C: **`copy`** + **`write_metadata`/`delete_metadata`** on existing C
 G (`info`/`verify`, rchdman).
 
 **Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target). See
-"Verification gates" below. **55 write/compat/unit tests green** (+2 `#[ignore]`d glibc-chdman FLAC
+"Verification gates" below. **58 write/compat/unit tests green** (+2 `#[ignore]`d glibc-chdman FLAC
 dump checks; the 5 failing `read_*` tests are pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`) and **verified green on GitHub Actions** (all 4 jobs:
 lint + test on ubuntu/windows/macos): clones the sibling codec crates at their tags (they're public),
 then `cargo build -p chd` + `cargo test -p chd --features write-zstd -- --skip tests::read` + fmt.
@@ -192,10 +192,17 @@ decision (may become a new crate).
       samples, no ECC strip, no header) + zlib subcode, port of `chd_cd_flac_compressor`. **Verified
       byte-identical to a glibc-built chdman 0.288** (`createcd -c cdfl`); libm-gated like raw `flac`
       (round-trip-correct against the MSVC oracle). The `cd` default `[cdlz,cdzl,cdfl,0]` now works.
+- [x] **`extractcd` (cue/bin) + `list_tracks`** ✅ — `cd::extract_to_cue` (port of `do_extract_cd`
+      `MODE_CUEBIN` + `output_track_metadata`: reconstruct the combined BIN — `frames`×`datasize`,
+      audio byte-swapped back, padding dropped, subcode omitted — and the CUE), `list_tracks`/
+      `TrackInfo` reading `CHT2`/`CHTR` (port of `parse_metadata`). **Byte-identical to `chdman
+      extractcd`** (cue **and** bin) + create→extract round-trip. (chdman writes the cue in text mode
+      → CRLF on Windows, LF on Linux; chd-rs matches the host platform.)
 - [x] **Tests** ✅ — `createcd -c cdzl`/`cdlz` byte-identical (single MODE1/2352 partial-last-hunk,
       **multi-track MODE1+AUDIO+in-file pregap**, flat-ISO MODE1/2048); `cdfl` round-trip + byte-
-      identical vs glibc chdman (`dump_cdfl_artifacts_for_glibc_check`).
-- [ ] GDI/Nero parser; `extractcd` (→cue/bin/gdi); `CdCookedReader`; `list_tracks`
+      identical vs glibc chdman; **`extractcd` cue+bin byte-identical** (single + multi-track);
+      `list_tracks` reads CHT2.
+- [ ] GDI/Nero parser; `.gdi`/split-bin extract; `extract_to_iso`; `CdCookedReader`
 
 ## M7 — Parent/diff + `HdImage`
 
@@ -260,6 +267,17 @@ Tracked in detail in [docs/libchdman-parity.md](docs/libchdman-parity.md). Phase
 
 ## Session log
 
+- 2026-06-20: **`extractcd` (cue/bin) + `list_tracks` — byte-identical to `chdman extractcd`.**
+  `cd::extract_to_cue` (port of `do_extract_cd` `MODE_CUEBIN` + `output_track_metadata`,
+  chdman.cpp:2638/1525): read the `CHT2`/`CHTR` track table (`read_track_metas`, port of
+  `parse_metadata`), decode the logical image via `ChdReader`, and per track emit `frames`×`datasize`
+  bytes (audio byte-pair-swapped back to LE, 4-frame padding dropped, subcode omitted) into one
+  combined BIN + a CUE (`FILE` once, then `TRACK`/`INDEX 00/01`/`PREGAP`/`POSTGAP`). `list_tracks` →
+  `Vec<TrackInfo>`. **Byte-identical to `chdman extractcd -o cue -ob bin`** (cue **and** bin) for
+  single MODE1/2352 and multi-track MODE1+AUDIO+pregap, plus a full create→extract round-trip (the
+  extracted bin == the original). **Learned: chdman writes the cue in text mode → CRLF on Windows /
+  LF on Linux**; chd-rs matches the host platform (`#[cfg(windows)]` `\n`→`\r\n`). 58 lib/compat
+  tests green (+3). Remaining cd: GDI/Nero, `.gdi`/split-bin extract, `extract_to_iso`, `CdCookedReader`.
 - 2026-06-20: **`cdfl` encoder DONE + built a glibc chdman 0.288 to prove FLAC byte-identity.**
   (1) Built **chdman 0.288 from MAME source in WSL** (Ubuntu 24.04, g++ 13.3): `make TOOLS=1 OSD=sdl
   USE_QTDEBUG=0 generate` then build only the `chdman` GENie target (pulls util + bundled 3rdparty,
