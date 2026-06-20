@@ -919,6 +919,139 @@ fn dvd_extract_roundtrips_and_rejects_non_dvd() {
     let _ = std::fs::remove_file(&raw_path);
 }
 
+/// `metadata::write_metadata` must match `chdman addmeta` byte-for-byte: append a new record to a
+/// CHD (linked into the list at EOF). chdman only edits **uncompressed** CHDs (MAME refuses a
+/// writeable open of a compressed one), so the base is `-c none` and the overall SHA-1 stays zero.
+#[test]
+fn addmeta_bit_exact_vs_chdman() {
+    use crate::metadata::{self, METADATA_FLAG_CHECKSUM};
+
+    let chdman = chdman_path();
+    let dir = std::env::temp_dir();
+    let in_path = dir.join("chdrs_addmeta_in.bin");
+    let base = dir.join("chdrs_addmeta_base.chd");
+    let ours = dir.join("chdrs_addmeta_ours.chd");
+    let reference = dir.join("chdrs_addmeta_ref.chd");
+
+    let input = make_input(256 * 1024);
+    File::create(&in_path).unwrap().write_all(&input).unwrap();
+    let s = Command::new(&chdman)
+        .arg("createhd")
+        .arg("-i")
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&base)
+        .args(["-c", "none"])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(s.success(), "createhd base failed");
+
+    std::fs::copy(&base, &ours).unwrap();
+    std::fs::copy(&base, &reference).unwrap();
+
+    // chdman addmeta mutates the input in place. `--valuetext` stores the string + NUL terminator.
+    let s = Command::new(&chdman)
+        .arg("addmeta")
+        .arg("-i")
+        .arg(&reference)
+        .args(["--tag", "TEST"])
+        .args(["--valuetext", "hello world"])
+        .status()
+        .expect("failed to run chdman");
+    assert!(s.success(), "chdman addmeta failed");
+
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&ours)
+            .unwrap();
+        metadata::write_metadata(
+            &mut f,
+            crate::make_tag(b"TEST"),
+            0,
+            b"hello world\0", // text form: trailing NUL like chdman's std::string overload
+            METADATA_FLAG_CHECKSUM,
+        )
+        .unwrap();
+    }
+
+    let ours_bytes = std::fs::read(&ours).unwrap();
+    let ref_bytes = std::fs::read(&reference).unwrap();
+    assert_eq!(
+        ours_bytes.len(),
+        ref_bytes.len(),
+        "addmeta size differs: ours={}, chdman={}",
+        ours_bytes.len(),
+        ref_bytes.len()
+    );
+    assert_eq!(ours_bytes, ref_bytes, "addmeta bytes differ from chdman");
+
+    let _ = std::fs::remove_file(&in_path);
+    let _ = std::fs::remove_file(&base);
+    let _ = std::fs::remove_file(&ours);
+    let _ = std::fs::remove_file(&reference);
+}
+
+/// `metadata::delete_metadata` must match `chdman delmeta` byte-for-byte: unlink the record (and,
+/// like chdman, leave the overall SHA-1 stale).
+#[test]
+fn delmeta_bit_exact_vs_chdman() {
+    use crate::metadata;
+
+    let chdman = chdman_path();
+    let dir = std::env::temp_dir();
+    let in_path = dir.join("chdrs_delmeta_in.bin");
+    let base = dir.join("chdrs_delmeta_base.chd");
+    let ours = dir.join("chdrs_delmeta_ours.chd");
+    let reference = dir.join("chdrs_delmeta_ref.chd");
+
+    let input = make_input(256 * 1024);
+    File::create(&in_path).unwrap().write_all(&input).unwrap();
+    let s = Command::new(&chdman)
+        .arg("createhd")
+        .arg("-i")
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&base)
+        .args(["-c", "none"])
+        .arg("-f")
+        .status()
+        .expect("failed to run chdman");
+    assert!(s.success(), "createhd base failed");
+
+    std::fs::copy(&base, &ours).unwrap();
+    std::fs::copy(&base, &reference).unwrap();
+
+    let s = Command::new(&chdman)
+        .arg("delmeta")
+        .arg("-i")
+        .arg(&reference)
+        .args(["--tag", "GDDD"])
+        .status()
+        .expect("failed to run chdman");
+    assert!(s.success(), "chdman delmeta failed");
+
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&ours)
+            .unwrap();
+        metadata::delete_metadata(&mut f, crate::make_tag(b"GDDD"), 0).unwrap();
+    }
+
+    let ours_bytes = std::fs::read(&ours).unwrap();
+    let ref_bytes = std::fs::read(&reference).unwrap();
+    assert_eq!(ours_bytes, ref_bytes, "delmeta bytes differ from chdman");
+
+    let _ = std::fs::remove_file(&in_path);
+    let _ = std::fs::remove_file(&base);
+    let _ = std::fs::remove_file(&ours);
+    let _ = std::fs::remove_file(&reference);
+}
+
 /// Build `pattern_ids.len()` hunks; hunks sharing a pattern id are byte-identical (forcing
 /// `COMPRESSION_SELF` refs). Pattern 0 is all-zeros; others are a distinct compressible sawtooth.
 fn build_hunks(hunk_size: usize, pattern_ids: &[u8]) -> Vec<u8> {
