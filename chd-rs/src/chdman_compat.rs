@@ -1293,6 +1293,108 @@ fn hd_image_diff_readable_by_chdman() {
     }
 }
 
+/// Full **`createraw -op` (compressed child of a parent)** byte-identity: a child whose image
+/// shares most hunks with the parent (→ `COMPRESSION_PARENT` refs) but differs in a few (→
+/// compressed) must equal `chdman createraw -op parent` byte-for-byte — exercising the parent hash
+/// map, the `COMPRESSION_PARENT` map encoding, and the `parent_sha1` header link.
+#[test]
+fn createraw_with_parent_bit_exact_vs_chdman() {
+    use crate::hd::{self, HdCreateOptions};
+
+    let chdman = chdman_path();
+    let dir = std::env::temp_dir();
+    let a = dir.join("chdrs_par_a.bin");
+    let b = dir.join("chdrs_par_b.bin");
+    let parent_chd = dir.join("chdrs_par_parent.chd");
+    let ref_chd = dir.join("chdrs_par_ref.chd");
+    let ours_chd = dir.join("chdrs_par_ours.chd");
+
+    let (hs, us) = (4096u32, 512u32);
+    let nhunks = 16usize;
+    let img_a = make_input(hs as usize * nhunks);
+    File::create(&a).unwrap().write_all(&img_a).unwrap();
+
+    // child shares all hunks with the parent except 3, 7, 11 (replaced with distinct data).
+    let mut img_b = img_a.clone();
+    for &h in &[3usize, 7, 11] {
+        let mut x = 0x1234_5678u32 ^ (h as u32).wrapping_mul(0x9e37_79b9);
+        for byte in &mut img_b[h * hs as usize..(h + 1) * hs as usize] {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *byte = (x & 0xff) as u8;
+        }
+    }
+    File::create(&b).unwrap().write_all(&img_b).unwrap();
+
+    let mk = |inp: &std::path::Path, out: &std::path::Path, parent: Option<&std::path::Path>| {
+        let mut c = Command::new(&chdman);
+        c.arg("createraw")
+            .args(["-i".as_ref(), inp.as_os_str()])
+            .args(["-o".as_ref(), out.as_os_str()])
+            .args(["-hs", &hs.to_string()])
+            .args(["-us", &us.to_string()])
+            .args(["-c", "zlib"]);
+        if let Some(p) = parent {
+            c.args(["-op".as_ref(), p.as_os_str()]);
+        }
+        assert!(
+            c.arg("-f").status().expect("run chdman").success(),
+            "chdman createraw failed"
+        );
+    };
+    mk(&a, &parent_chd, None);
+    mk(&b, &ref_chd, Some(&parent_chd));
+    let reference = std::fs::read(&ref_chd).unwrap();
+
+    hd::create_raw_from_path_with_parent(
+        &b,
+        &ours_chd,
+        &parent_chd,
+        HdCreateOptions {
+            codecs: [crate::CHD_CODEC_ZLIB, 0, 0, 0],
+            ..Default::default()
+        },
+        &mut |_| {},
+        &|| false,
+    )
+    .unwrap();
+    let ours = std::fs::read(&ours_chd).unwrap();
+
+    assert_eq!(
+        ours.len(),
+        reference.len(),
+        "createraw -op size differs: ours={}, chdman={}",
+        ours.len(),
+        reference.len()
+    );
+    assert_eq!(
+        ours, reference,
+        "createraw -op child bytes differ from chdman"
+    );
+
+    // Sanity: parent refs actually fired (most hunks are COMPRESSION_PARENT, not stored).
+    let mut chd = Chd::open(BufReader::new(File::open(&ours_chd).unwrap()), None).unwrap();
+    let parent_refs = (0..chd.header().hunk_count())
+        .filter(|&n| {
+            matches!(
+                chd.map().get_entry(n as usize),
+                Some(MapEntry::V5Compressed(e))
+                    if matches!(e.hunk_type(), Ok(CompressionTypeV5::CompressionParent))
+            )
+        })
+        .count();
+    assert_eq!(
+        parent_refs,
+        nhunks - 3,
+        "expected all-but-3 hunks to be parent refs"
+    );
+
+    for p in [&a, &b, &parent_chd, &ref_chd, &ours_chd] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// Build `pattern_ids.len()` hunks; hunks sharing a pattern id are byte-identical (forcing
 /// `COMPRESSION_SELF` refs). Pattern 0 is all-zeros; others are a distinct compressible sawtooth.
 fn build_hunks(hunk_size: usize, pattern_ids: &[u8]) -> Vec<u8> {

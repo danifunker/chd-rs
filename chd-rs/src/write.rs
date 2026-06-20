@@ -170,6 +170,45 @@ fn sha1_digest(data: &[u8]) -> [u8; 20] {
     h.finalize().into()
 }
 
+/// Precomputed parent-hunk hashes for parent dedup when writing a child CHD. Keyed by the
+/// `(crc16, sha1)` of a `hunk_bytes`-sized window at each unit-aligned offset in the parent's
+/// (padded) logical image; the value is that **unit offset** (the `COMPRESSION_PARENT` reference).
+pub(crate) struct ParentRef {
+    map: HashMap<(u16, [u8; 20]), u64>,
+    sha1: [u8; 20],
+}
+
+/// Build a [`ParentRef`] from the parent's padded logical image (`hunk_count * hunk_bytes` bytes,
+/// last hunk zero-padded). Port of `chd_file_compressor::async_walk_parent` (`chd.cpp:3208`) + the
+/// hashmap insert in `compress_continue` (`chd.cpp:3084`): for parent hunk `h` it hashes `units`
+/// windows (`units = hunk_bytes/unit_bytes`, or **1** for the last hunk) at unit offsets
+/// `h*uph + unit`, each a `hunk_bytes` window starting at that unit — so a child hunk can match the
+/// parent at any unit-aligned position, not just hunk boundaries. First occurrence of a hash wins.
+pub(crate) fn build_parent_ref(
+    padded_img: &[u8],
+    hunk_bytes: u32,
+    unit_bytes: u32,
+    hunk_count: u32,
+    sha1: [u8; 20],
+) -> ParentRef {
+    let uph = (hunk_bytes / unit_bytes) as u64;
+    let hb = hunk_bytes as usize;
+    let ub = unit_bytes as usize;
+    let mut map: HashMap<(u16, [u8; 20]), u64> = HashMap::new();
+    for h in 0..hunk_count as u64 {
+        let units = if h == hunk_count as u64 - 1 { 1 } else { uph };
+        for unit in 0..units {
+            let pos = h * uph + unit;
+            let start = pos as usize * ub;
+            let window = &padded_img[start..start + hb];
+            let crc = crate::block_hash::CRC16.checksum(window);
+            let key = (crc, sha1_digest(window));
+            map.entry(key).or_insert(pos);
+        }
+    }
+    ParentRef { map, sha1 }
+}
+
 /// Write a complete **compressed** V5 CHD containing `data`, using a single codec, intended to
 /// be byte-identical to `chdman createraw -c <codec> -hs <hunk_bytes> -us <unit_bytes>`.
 ///
@@ -221,6 +260,7 @@ pub fn write_raw<W: Write + Seek>(
         unit_bytes,
         codecs,
         &[],
+        None,
         &mut |_, _, _| {},
         &|| false,
     )
@@ -246,6 +286,7 @@ pub(crate) fn write_raw_inner<W: Write + Seek>(
     unit_bytes: u32,
     codecs: &[CodecType],
     metadata: &[MetaEntry],
+    parent: Option<&ParentRef>,
     progress: &mut dyn FnMut(u64, u64, u64),
     cancel: &dyn Fn() -> bool,
 ) -> Result<()> {
@@ -312,6 +353,17 @@ pub(crate) fn write_raw_inner<W: Write + Seek>(
             continue;
         }
 
+        // PARENT: identical to a (unit-aligned window of the) parent -> reference it. Checked after
+        // SELF, matching chdman's `compress_continue` priority. Not added to the self map (chdman
+        // only adds hunks it actually writes).
+        if let Some(p) = parent {
+            if let Some(&refunit) = p.map.get(&(crc, sha1)) {
+                rawmap[base] = COMPRESSION_PARENT;
+                put_u48be(&mut rawmap[base + 4..base + 10], refunit);
+                continue;
+            }
+        }
+
         // find_best_compressor: baseline is "store NONE" at hunk_bytes; a codec wins only if it
         // is strictly smaller than the current best, earliest slot first.
         let mut best_type = COMPRESSION_NONE;
@@ -371,7 +423,9 @@ pub(crate) fn write_raw_inner<W: Write + Seek>(
     hdr[60..64].copy_from_slice(&unit_bytes.to_be_bytes());
     hdr[64..84].copy_from_slice(&raw_sha1);
     hdr[84..104].copy_from_slice(&overall_sha1);
-    // parent_sha1 (104..124) = 0
+    if let Some(p) = parent {
+        hdr[104..124].copy_from_slice(&p.sha1);
+    }
 
     out.write_all(&hdr)?;
     out.write_all(&meta_blob)?;
@@ -759,6 +813,6 @@ pub(crate) fn write_create<W: Write + Seek>(
         });
     };
     write_raw_inner(
-        out, data, hunk_size, unit_size, codecs, metadata, &mut prog, cancel,
+        out, data, hunk_size, unit_size, codecs, metadata, None, &mut prog, cancel,
     )
 }

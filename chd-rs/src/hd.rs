@@ -226,6 +226,88 @@ pub fn create_raw_from_path(
     create_from_path_impl(in_path, out_path, opts, false, progress, cancel)
 }
 
+/// Create a **compressed child** CHD of `parent_path` (chdman `createraw -op`), **byte-identical to
+/// chdman**. Hunks of `in_path` identical to a (unit-aligned window of the) parent become
+/// `COMPRESSION_PARENT` references instead of being stored; the rest are compressed normally, and
+/// the header links the parent via `parent_sha1`.
+///
+/// The child inherits the parent's hunk/unit sizes and logical size (the input is zero-padded to
+/// it); only `opts.codecs` is used (`geometry`/`ident` are ignored — this writes no metadata, like
+/// `createraw`). The parent must be **compressed** (an uncompressed parent has no SHA-1 to link).
+pub fn create_raw_from_path_with_parent(
+    in_path: &Path,
+    out_path: &Path,
+    parent_path: &Path,
+    opts: HdCreateOptions,
+    progress: &mut dyn FnMut(CompressionProgress),
+    cancel: &dyn Fn() -> bool,
+) -> Result<()> {
+    let codecs = write::resolve_codecs(&opts.codecs)?;
+    if codecs.is_empty() {
+        // A parent diff is inherently a compressed format (the map needs the 12-byte entries).
+        return Err(Error::InvalidParameter);
+    }
+
+    // Open the parent; inherit its geometry and decode its full (padded) image for the hash map.
+    let mut parent = Chd::open(
+        BufReader::new(File::open(parent_path).map_err(Error::from)?),
+        None,
+    )?;
+    let hunk_bytes = parent.header().hunk_size();
+    let unit_bytes = parent.header().unit_bytes();
+    let logical = parent.header().logical_bytes();
+    let hunk_count = parent.header().hunk_count();
+    let parent_sha1 = parent.header().sha1().unwrap_or([0u8; 20]);
+    if parent_sha1 == [0u8; 20] {
+        return Err(Error::UnsupportedFormat);
+    }
+
+    let mut img = vec![0u8; hunk_count as usize * hunk_bytes as usize];
+    let mut comp = Vec::new();
+    for h in 0..hunk_count {
+        let dst = &mut img[h as usize * hunk_bytes as usize..][..hunk_bytes as usize];
+        parent.hunk(h)?.read_hunk_in(&mut comp, dst)?;
+    }
+    let pref = write::build_parent_ref(&img, hunk_bytes, unit_bytes, hunk_count, parent_sha1);
+    drop(parent);
+
+    let data = write::read_and_pad(
+        BufReader::new(File::open(in_path).map_err(Error::from)?),
+        logical,
+        unit_bytes,
+        hunk_bytes,
+    )?;
+
+    let mut out = File::create(out_path).map_err(Error::from)?;
+    let mut prog = |done: u64, total: u64, c: u64| {
+        progress(CompressionProgress {
+            bytes_done: done,
+            bytes_total: total,
+            ratio: if done == 0 {
+                1.0
+            } else {
+                c as f64 / done as f64
+            },
+        });
+    };
+    let res = write::write_raw_inner(
+        &mut out,
+        &data,
+        hunk_bytes,
+        unit_bytes,
+        &codecs,
+        &[],
+        Some(&pref),
+        &mut prog,
+        cancel,
+    );
+    if res.is_err() {
+        drop(out);
+        let _ = std::fs::remove_file(out_path);
+    }
+    res
+}
+
 /// Full **`createhd`**: stream `reader` into a hard-disk CHD with a `GDDD` geometry record (+ an
 /// optional `IDNT` ident from `opts.ident`), **byte-identical to `chdman createhd`** for the same
 /// input/options. Geometry is `opts.geometry` or, if `None`, derived via [`compute_chs`].
