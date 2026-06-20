@@ -17,7 +17,7 @@ surface as free functions; do not graft libchdman-rs's owned, mutable `Chd` hand
 | | libchdman-rs | chd-rs |
 | --- | --- | --- |
 | Type | `Chd` — an **owned** handle over a path/`ChdIo`, with a `writeable` flag | `Chd<F: Read + Seek>` — a **generic, borrowed** reader |
-| Mutability | one handle **reads *and* writes** at runtime | **reads only**; creation is via free functions; runtime block writes via a future `HdImage` |
+| Mutability | one handle **reads *and* writes** at runtime | **reads only**; creation is via free functions; runtime per-sector block writes via [`hd::HdImage`](#runtime-block-device-hdimage) |
 | Custom I/O | the `ChdIo: Read + Write + Seek` trait | **any `Read + Seek`** — no trait needed |
 | Compression | async `ChdCompressor` + `ChdDataHandler` pull model | **synchronous** create functions with `progress`/`cancel` callbacks |
 
@@ -123,7 +123,8 @@ copy::copy(src_path, dst_path, opts, &mut |_p| {}, &|| false)?;
 
 Byte-identical to `chdman copy`: re-compresses the source's logical bytes into the new codec
 list/hunk size and clones every metadata record verbatim, preserving the unit size and `raw_sha1`.
-(Legacy CD/GD metadata re-do is not yet implemented — that lands with the `cd` module.)
+(Re-doing *legacy* CD/GD metadata — `CHCD`/`CHTR`/`CHGT` → `CHT2` — for legacy-source copies is not
+yet implemented; modern `CHT2`/`CHGD` sources copy verbatim and correctly.)
 
 ### DVD (`createdvd` / `extractdvd`)
 
@@ -136,6 +137,41 @@ dvd::extract_to_iso(chd_path, iso_path, &mut |_done| {})?;
 Same shape as libchdman-rs's `dvd` module; byte-identical to `chdman createdvd`. Flat 2048-byte
 sectors + the empty `DVD ` metadata record. `extract_*` rejects non-DVD CHDs with
 `Error::UnsupportedFormat`.
+
+### CD-ROM / GD-ROM (`createcd` / `extractcd`)
+
+```rust
+use chd::cd::{self, CdCreateOptions};
+// input dispatched by what you call: a CUE sheet, a Dreamcast .gdi, or a flat sector image.
+cd::create_from_cue(cue_path, out_path, CdCreateOptions::default(), &mut |_p| {}, &|| false)?;
+cd::create_from_gdi(gdi_path, out_path, CdCreateOptions::default(), &mut |_p| {}, &|| false)?;
+cd::create_from_iso(iso_path, out_path, CdCreateOptions::default(), &mut |_p| {}, &|| false)?;
+
+// extract back to cue+bin, to a .gdi + split track files, or a single MODE1 track to a raw .iso:
+cd::extract_to_cue(chd_path, cue_path, bin_path, &mut |_done| {})?;
+cd::extract_to_gdi(chd_path, gdi_path, &mut |_done| {})?;
+cd::extract_to_iso(chd_path, iso_path, &mut |_done| {})?;
+
+// read the track table, or stream a MODE1 track's cooked 2048-byte sectors (Read + Seek):
+let tracks: Vec<cd::TrackInfo> = cd::list_tracks(&mut chd)?;
+let mut cooked = cd::CdCookedReader::open(chd)?;
+```
+
+Byte-identical to `chdman createcd`/`extractcd`. `CdCreateOptions.codecs` defaults to
+`[cdlz, cdzl, cdfl, 0]`. The pure-Rust CUE/GDI/ISO TOC parser replaces MAME's `cdrom_file::parse_*`.
+(`extract_to_iso` / `CdCookedReader` have no chdman command and are round-trip-verified.)
+
+### Compressed child of a parent (`createraw -op`)
+
+```rust
+// libchdman-rs: Chd::create_with_parent(..)
+// chd-rs: hunks identical to the parent become COMPRESSION_PARENT refs; parent_sha1 is linked.
+hd::create_raw_from_path_with_parent(in_path, out_path, parent_path, opts, &mut |_p| {}, &|| false)?;
+```
+
+Byte-identical to `chdman createraw -op`. The child inherits the parent's hunk/unit/logical sizes.
+For the *uncompressed diff* form (runtime writes against a compressed parent) see
+[`hd::HdImage`](#runtime-block-device-hdimage).
 
 ### Editing metadata on an existing CHD (`addmeta` / `delmeta`)
 
@@ -188,28 +224,70 @@ appended after `Error::Unknown` so the existing libchdr-ABI discriminants are un
 
 ---
 
+## Runtime block device (`HdImage`)
+
+libchdman-rs's owned, writeable `Chd` lets a running machine read/write sectors at runtime. chd-rs
+puts that on a dedicated `hd::HdImage` (chd-rs's `Chd` stays read-only):
+
+```rust
+use chd::hd::HdImage;
+// in-place edits to an uncompressed HD CHD:
+let mut img = HdImage::open(path)?;
+// or an uncompressed *diff* over a compressed parent — writes land in the diff, unwritten
+// sectors fall through to the parent (exactly how MAME writes to a compressed image):
+let mut img = HdImage::open_with_diff(parent_path, diff_path)?; // or ::reopen_diff(..)
+
+let mut buf = vec![0u8; img.sector_size() as usize];
+img.read_sector(lba, &mut buf)?;
+img.write_sector(lba, &buf)?;
+```
+
+| libchdman-rs `HdImage` | chd-rs `hd::HdImage` |
+| --- | --- |
+| `open` / `open_with_diff` / `reopen_diff` | same names |
+| `read_sector` / `write_sector` / `sector_size` / `sector_count` / `geometry` | same |
+| `as_chd` / `as_chd_mut` | — (chd-rs's `Chd` is read-only; use `read_sector` or re-`open` for reads) |
+
+The diff is a standard uncompressed-with-parent CHD; `chdman extracthd -ip <parent>` reads it back.
+
+## Verifying a CHD (`verify`)
+
+```rust
+let r = chd.verify()?;                       // needs the `verify` feature (also pulled in by `write`)
+assert!(r.is_valid());                       // raw + overall (metadata-inclusive) SHA-1
+// r.raw_sha1_valid(), r.overall_sha1_valid(), r.computed_raw_sha1, r.expected_sha1, …
+```
+
+`Chd::verify()` recomputes both checksums and compares them to the header (uncompressed CHDs carry
+none → `Error::UnsupportedFormat`). `Chd::info() -> ChdInfo` mirrors `chdman info`.
+
+---
+
 ## 5. Not ported (and the chd-rs equivalent)
 
 | libchdman-rs | chd-rs equivalent |
 | --- | --- |
 | `ChdIo` trait | any `Read + Seek` (generic) |
 | `ChdCompressor` / `ChdDataHandler` / `CompressStep` | synchronous create fns + `progress`/`cancel` |
-| `Chd::create` / `Chd::create_with_parent` | `hd::create_*` / `hd::create_raw_*` (parent/diff in a later phase) |
+| `Chd::create` / `Chd::create_with_parent` | `hd::create_*` / `hd::create_raw_from_path_with_parent` |
 | `copy::copy` / `CopyOptions` | `copy::copy` / `copy::CopyOptions` (same shape) |
 | `Chd::write_metadata` / `delete_metadata` | `metadata::write_metadata` / `delete_metadata` (free fns over a `Read+Write+Seek` handle) |
-| `Chd::write_hunk` / `write_bytes` | runtime writes via a future `HdImage` |
+| `Chd::write_hunk` / `write_bytes` | [`hd::HdImage::write_sector`](#runtime-block-device-hdimage) |
 | `Chd::clone_all_metadata` | done inside `copy::copy` |
-| `Chd::info()` / `verify()` / `ChdInfo` | Phase G |
+| `Chd::info()` / `verify()` / `ChdInfo` | [`Chd::info()` / `Chd::verify()`](#verifying-a-chd-verify) / `ChdInfo` |
+| `HdImage` (+ `open`/`open_with_diff`/`read_sector`/…) | [`hd::HdImage`](#runtime-block-device-hdimage) |
+| `cd::create_from_*` / `extract_to_*` / `list_tracks` / `CdCookedReader` | same names in `chd::cd` (§2) |
 | `make_tag(a,b,c,d)` (4-arg) | crate-internal `make_tag(&[u8;4])` |
 
 `HunkIter`/`MetadataIter`/`ChdReader`/`HunkReader` and the metadata tag constants exist under
-different names — see [libchdman-parity.md](libchdman-parity.md) §3.7.
+different names — see [libchdman-parity.md](libchdman-parity.md) §3.7. The only libchdman-rs input
+not yet handled is **Nero `.nrg`** (a binary TOC with no fixture path to verify against).
 
 ---
 
 ## 6. FLAC byte-identity caveat
 
-The raw `flac` codec (and, later, `cdfl` / the DVD default) is backed by
+The `flac` and `cdfl` codecs (and the HD/DVD default sets that include `flac`) are backed by
 [`libflac-rs`](../../libflac-rs), whose float parity is validated against **glibc** libm. Output is
 byte-identical to a **glibc-built** chdman, but may differ by a few bytes from an **MSVC/Windows**
 chdman. It is always **round-trip-correct** (decodes back to the original PCM, and chdman extracts

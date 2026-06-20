@@ -150,6 +150,65 @@ to change but should be considered mostly stable.
 In particular the type signature for [`HuffmanDecoder`](https://github.com/SnowflakePowered/chd-rs/blob/e03e093021f1705d46fe6aaa8b32593489e55467/chd-rs/src/huffman.rs#L110)
 is subject to change once [`generic_const_exprs`](https://github.com/rust-lang/rust/issues/76560) is stabilized.
 
+## Migrating
+
+### From a previous chd-rs version (read-only 0.2 / 0.3)
+
+**The read API is unchanged.** `Chd::open`, `chd.header()`, `chd.hunk(n)?.read_hunk_in(..)`,
+`chd.metadata_refs()`, and the `read::ChdReader` / `read::HunkBufReader` adapters all behave exactly
+as before — existing read code needs **no changes**.
+
+Everything new is **additive and feature-gated**, so a default build still pulls in nothing extra:
+
+| Want | Enable | Get |
+| --- | --- | --- |
+| Create / extract / copy / edit metadata | `write` | the `hd` / `cd` / `dvd` / `copy` modules, `metadata::write_metadata`/`delete_metadata`, `hd::HdImage`, `CompressionProgress` — all byte-identical to chdman 0.288 |
+| zstd / cdzs encoding | `write-zstd` | the above + the Zstandard encoders |
+| Integrity check | `verify` (also pulled in by `write`) | `Chd::verify() -> VerifyResult` |
+
+Available with **no feature** (read builds included): the `codec` module + the crate-root
+`CHD_CODEC_*` constants and `parse_codec_spec`/`codec_name`/`codec_exists`; `Chd::info() -> ChdInfo`;
+and `Header::compression() -> [u32; 4]`.
+
+**One source-breaking change:** `chd::Error` gained a `Cancelled` variant (used by the create API).
+It is appended **last**, so the `#[repr(C)]` discriminants of the existing variants — and the libchdr
+C ABI — are unchanged. Only an *exhaustive* `match` on `chd::Error` (no `_` arm) needs a new arm;
+code using `?` / `Result` is unaffected.
+
+The bundled `rchdman` CLI also gained `createraw`/`createhd`/`createcd`/`createdvd`/`copy`/`addmeta`/
+`delmeta`/`extractcd`/`extractdvd`, and its `verify` now checks the full raw + metadata SHA-1.
+
+### From libchdman-rs
+
+chd-rs offers the same create/extract/copy/verify functionality as `libchdman-rs` (a MAME C++
+wrapper) but keeps its own read idioms. The headline differences:
+
+| libchdman-rs | chd-rs |
+| --- | --- |
+| an owned, **writeable** `Chd` handle (`Chd::open(path, writeable, parent)`) | a generic, **borrowed read-only** `Chd<F: Read + Seek>`; create/extract are free functions |
+| `Chd::create*` / `Chd::write_metadata` / `Chd::write_bytes` (methods) | `hd::create_*` / `metadata::write_metadata` / `hd::HdImage::write_sector` (free fns / a dedicated type) |
+| `ChdIo: Read + Write + Seek` trait | any `Read + Seek` — no trait needed |
+| async `ChdCompressor` + `CompressStep` pull loop | synchronous create fns taking `progress` / `cancel` callbacks |
+
+```rust
+// libchdman-rs:  let chd = Chd::open(path, /*writeable=*/ false, /*parent=*/ None)?;
+// chd-rs — a Read+Seek, no `writeable`:
+let chd = chd::Chd::open(std::io::BufReader::new(std::fs::File::open(path)?), None)?;
+
+// libchdman-rs:  chd.create(..) driving ChdCompressor
+// chd-rs — a free function with progress/cancel callbacks:
+use chd::hd::{self, HdCreateOptions};
+hd::create_from_path(in_path, out_path, HdCreateOptions::default(), &mut |_p| {}, &|| false)?;
+```
+
+The owned-handle runtime read/write surface maps to `hd::HdImage` (`open` / `open_with_diff` /
+`read_sector` / `write_sector`); `CompressionProgress` matches libchdman-rs field-for-field.
+
+For the exhaustive "translate my libchdman-rs code" guide (every accessor and diverging item) see
+[docs/libchdman-differences.md](docs/libchdman-differences.md); the full API map is in
+[docs/libchdman-parity.md](docs/libchdman-parity.md), and the chdman-command mapping in
+[docs/chdman-mapping.md](docs/chdman-mapping.md).
+
 ## `rchdman` command line tool
 chd-rs ships `rchdman`, a chdman-style CLI covering read **and** create operations:
 
