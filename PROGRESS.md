@@ -28,8 +28,8 @@ GDDD/IDNT). C: **`copy`** + **`write_metadata`/`delete_metadata`** on existing C
 G (`info`/`verify`, rchdman).
 
 **Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target). See
-"Verification gates" below. **54 write/compat/unit tests green** (the 5 failing `read_*` tests are
-pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`) and **verified green on GitHub Actions** (all 4 jobs:
+"Verification gates" below. **55 write/compat/unit tests green** (+2 `#[ignore]`d glibc-chdman FLAC
+dump checks; the 5 failing `read_*` tests are pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`) and **verified green on GitHub Actions** (all 4 jobs:
 lint + test on ubuntu/windows/macos): clones the sibling codec crates at their tags (they're public),
 then `cargo build -p chd` + `cargo test -p chd --features write-zstd -- --skip tests::read` + fmt.
 **`Chd::info()` + `ChdInfo`** (read-side) also landed (Phase G partial).
@@ -177,7 +177,8 @@ decision (may become a new crate).
       ECC strip for verifiable data sectors via `ecc.rs`, `[ecc_flags‖complen‖sector‖subcode]`
       header). `CdZlibEncoder`/`CdLzmaEncoder`/`CdZstdEncoder`; wired into `init_encoder`.
       **`cdzl`/`cdlz` byte-identical to chdman** (per-hunk, MODE1 ECC-strip path) + round-trip.
-      `CdFlacEncoder` (cdfl) still TODO (libm-gated; FLAC base + zlib subcode, no ECC strip).
+      **`cdfl` (`CdFlacEncoder`) DONE** — separate path (FLAC base + zlib subcode, *no* ECC strip/
+      header); byte-identical to a glibc chdman (libm-gated). See the M6 cdfl entry below.
 - [x] **CUE + ISO TOC parser** (pure Rust) ✅ — `parse_cue` (port of `cdrom.cpp:2336`: FILE/TRACK/
       INDEX/PREGAP/POSTGAP, single- and multi-file BIN, the common MODE1/MODE2/AUDIO types, audio
       byte-swap, 4-frame track padding) + `parse_iso` (size-inferred single track). GDI/Nero still TODO.
@@ -187,9 +188,14 @@ decision (may become a new crate).
 - [x] **`create_from_cue`/`create_from_iso`** ✅ — assemble the 2448-frame logical image (port of
       `chd_cd_compressor::read_data`) + CHT2 + `write_create`; **byte-identical to `chdman createcd`**.
       `extract_to_cue`/`extract_to_iso`/`extract_to_gdi` still TODO.
-- [x] **Tests** ✅ — `createcd -c cdzl`/`cdlz` byte-identical: single MODE1/2352 (partial last hunk),
-      **multi-track MODE1+AUDIO+in-file pregap** (V-prefixed PGTYPE, swap), and flat-ISO MODE1/2048.
-- [ ] GDI/Nero parser; `extractcd` (→cue/bin/gdi); `CdCookedReader`; `list_tracks`; `cdfl` encoder
+- [x] **`cdfl` encoder** ✅ — `CdFlacEncoder` (`compression/flac.rs`): FLAC sector run (big-endian
+      samples, no ECC strip, no header) + zlib subcode, port of `chd_cd_flac_compressor`. **Verified
+      byte-identical to a glibc-built chdman 0.288** (`createcd -c cdfl`); libm-gated like raw `flac`
+      (round-trip-correct against the MSVC oracle). The `cd` default `[cdlz,cdzl,cdfl,0]` now works.
+- [x] **Tests** ✅ — `createcd -c cdzl`/`cdlz` byte-identical (single MODE1/2352 partial-last-hunk,
+      **multi-track MODE1+AUDIO+in-file pregap**, flat-ISO MODE1/2048); `cdfl` round-trip + byte-
+      identical vs glibc chdman (`dump_cdfl_artifacts_for_glibc_check`).
+- [ ] GDI/Nero parser; `extractcd` (→cue/bin/gdi); `CdCookedReader`; `list_tracks`
 
 ## M7 — Parent/diff + `HdImage`
 
@@ -254,6 +260,18 @@ Tracked in detail in [docs/libchdman-parity.md](docs/libchdman-parity.md). Phase
 
 ## Session log
 
+- 2026-06-20: **`cdfl` encoder DONE + built a glibc chdman 0.288 to prove FLAC byte-identity.**
+  (1) Built **chdman 0.288 from MAME source in WSL** (Ubuntu 24.04, g++ 13.3): `make TOOLS=1 OSD=sdl
+  USE_QTDEBUG=0 generate` then build only the `chdman` GENie target (pulls util + bundled 3rdparty,
+  not the emulator). (2) **Proved the libm-gating theory**: chd-rs's raw `flac` CHD is **byte-for-byte
+  identical** to this glibc chdman (`dump_flac_artifacts_for_glibc_check` → 2769==2769 bytes) — the
+  MSVC-vs-glibc libm was the only prior difference. (3) **`CdFlacEncoder`** (`compression/flac.rs`):
+  port of `chd_cd_flac_compressor::compress` (chdcodec.cpp:1634) — de-swizzle (NO ECC strip), FLAC
+  the sector run as big-endian int16 stereo (blocksize halves while >2352, NO endian flag byte),
+  raw-deflate the subcode, emit `[flac‖deflate]` (no header). Wired into `init_encoder` (`FlacCdV5`).
+  **Verified byte-identical to glibc chdman `createcd -c cdfl`** (`dump_cdfl_artifacts_for_glibc_check`
+  → 11822==11822 bytes) + round-trip. The `cd` default `[cdlz,cdzl,cdfl,0]` now works. 55 lib/compat
+  tests green (+cdfl round-trip; +2 `#[ignore]`d glibc dump tests).
 - 2026-06-20: **Phase E `createcd` container — byte-identical to `chdman createcd`.** New public
   `cd` module (`cd.rs`): a pure-Rust **CUE parser** (`parse_cue`, port of `cdrom.cpp:2336` — FILE/
   TRACK/INDEX/PREGAP/POSTGAP, single- and multi-file BIN, MODE1/MODE2/AUDIO, the audio byte-swap,

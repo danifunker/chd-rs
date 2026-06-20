@@ -35,8 +35,8 @@ and [docs/chdman-mapping.md](../../libchdman-rs/docs/chdman-mapping.md).
 **Done (cont.):** **`cd` createcd** — `cd::create_from_cue`/`create_from_iso` + the CUE/ISO TOC
 parser + CHT2 metadata, byte-identical to `chdman createcd`.
 
-**Left:** `extractcd` + the rest of `cd` (GDI/Nero, `list_tracks`, `CdCookedReader`, `cdfl`);
-`verify`; parent/diff + runtime writes; remaining docs. Everything below.
+**Left:** `extractcd` + the rest of `cd` (GDI/Nero, `list_tracks`, `CdCookedReader`); `verify`;
+parent/diff + runtime writes; remaining docs. Everything below.
 
 ---
 
@@ -122,7 +122,7 @@ wrapper) · ⬜ to build.
 
 | libchdman-rs | chd-rs target | status | notes |
 | --- | --- | --- | --- |
-| `CdCreateOptions{hunk_size,codecs}` (default 19584, `[cdlz,cdzl,cdfl,0]`) | `cd::CdCreateOptions` | ✅ | done; default matches (note: `cdfl` has no encoder yet, so the default set currently errors — pass `[cdlz,cdzl,0,0]`). |
+| `CdCreateOptions{hunk_size,codecs}` (default 19584, `[cdlz,cdzl,cdfl,0]`) | `cd::CdCreateOptions` | ✅ | done; default matches and works (all of `cdlz`/`cdzl`/`cdfl` encode — `cdfl` byte-identical to a glibc chdman, libm-gated). |
 | `TrackType`/`SubcodeType`/`TrackInfo` | `cd::TrackType`/`cd::SubcodeType` | ✅/⬜ | enums done (+ `type_string`/`subtype_string`); `TrackInfo`/`list_tracks` (read CHT2) still ⬜. |
 | `create_from_cue/create_from_iso` | `cd::create_from_cue`/`create_from_iso` | ✅ | done & **byte-identical to `chdman createcd`** (`-c cdzl`/`cdlz`): pure-Rust CUE (`parse_cue`) + ISO (`parse_iso`) parser, 2448-frame assembly (port of `chd_cd_compressor::read_data`), CHT2 metadata. GDI/Nero/WAVE/GD-ROM not yet. |
 | `list_tracks(chd)` | new (read CHT2 metadata) | ⬜ | |
@@ -178,12 +178,12 @@ Ordered by dependency; maps onto PARITY_PLAN M3–M8.
   additionally handle compressed CHDs correctly.
 - **Phase D — `dvd` module. ✅ DONE.** Flat 2048 sectors + the empty `DVD ` record (1-NUL payload),
   reusing the createhd metadata writer. `createdvd` verified byte-identical (`-c none/zlib/lzma`).
-- **Phase E — `cd` module.** CD wrapper **encoders** ✅ DONE (`CdEncoder<E,S>`, cdzl/cdlz/cdzs
-  byte-identical; cdfl pending). **`createcd` container** ✅ DONE — `cd::create_from_cue`/
-  `create_from_iso` (pure-Rust CUE+ISO TOC parser, 2448-frame assembly, CHT2 metadata) are
-  **byte-identical to `chdman createcd`** (`-c cdzl`/`cdlz`; single MODE1/2352, multi-track
-  MODE1+AUDIO+pregap, flat ISO). Remaining: `extractcd` + `extract_to_{cue,iso,gdi}`, GDI/Nero
-  parsing, `list_tracks`, `CdCookedReader`, the `cdfl` encoder.
+- **Phase E — `cd` module.** CD wrapper **encoders** ✅ DONE — `cdzl`/`cdlz`/`cdzs` (`CdEncoder<E,S>`)
+  byte-identical; **`cdfl`** (`CdFlacEncoder`) byte-identical to a glibc chdman (libm-gated, like raw
+  `flac`). **`createcd` container** ✅ DONE — `cd::create_from_cue`/`create_from_iso` (pure-Rust
+  CUE+ISO TOC parser, 2448-frame assembly, CHT2 metadata) are **byte-identical to `chdman createcd`**
+  (single MODE1/2352, multi-track MODE1+AUDIO+pregap, flat ISO, all four codecs). Remaining:
+  `extractcd` + `extract_to_{cue,iso,gdi}`, GDI/Nero parsing, `list_tracks`, `CdCookedReader`.
 - **Phase F — parent/diff + `HdImage`.** Uncompressed diff children vs a compressed parent
   (parent-hunk dedup lights up here — the driver hook exists), runtime `read_sector`/`write_sector`,
   `write_hunk`/`write_bytes` equivalents.
@@ -213,8 +213,11 @@ Ordered by dependency; maps onto PARITY_PLAN M3–M8.
 - **Round-trip**: `create → chd-rs decode → equal logical bytes + raw_sha1`.
 - **API-shape tests**: a doc-test per new public function so the surface compiles as documented.
 - ⚠️ **flac is libm-dependent** — byte-identity for `flac`/`cdfl`/dvd-default needs the reference
-  chdman and `libflac-rs` to agree on libm (glibc). Confirm the reference build before asserting
-  byte-identity on flac paths; until then gate those as round-trip-only.
+  chdman and `libflac-rs` to agree on libm (glibc). **Confirmed:** against a **glibc-built chdman
+  0.288** (compiled from MAME source via `make TOOLS=1 OSD=sdl USE_QTDEBUG=0` + the `chdman` target),
+  both the raw `flac` and `cdfl` paths are **byte-identical** (the `dump_*_artifacts_for_glibc_check`
+  `#[ignore]`d tests emit the artifacts to compare). Against the default **MSVC/Windows** oracle the
+  FLAC paths are gated round-trip-only.
 
 ---
 
