@@ -28,7 +28,7 @@ GDDD/IDNT). C: **`copy`** + **`write_metadata`/`delete_metadata`** on existing C
 G (`info`/`verify`, rchdman).
 
 **Verification oracle:** `C:\Tools\chdman\chdman.exe` (0.288, the parity target). See
-"Verification gates" below. **58 write/compat/unit tests green** (+2 `#[ignore]`d glibc-chdman FLAC
+"Verification gates" below. **62 write/compat/unit tests green** (+2 `#[ignore]`d glibc-chdman FLAC
 dump checks; the 5 failing `read_*` tests are pre-existing missing-fixture cases, unrelated to write). **CI** added (`.github/workflows/ci.yml`) and **verified green on GitHub Actions** (all 4 jobs:
 lint + test on ubuntu/windows/macos): clones the sibling codec crates at their tags (they're public),
 then `cargo build -p chd` + `cargo test -p chd --features write-zstd -- --skip tests::read` + fmt.
@@ -198,11 +198,18 @@ decision (may become a new crate).
       `TrackInfo` reading `CHT2`/`CHTR` (port of `parse_metadata`). **Byte-identical to `chdman
       extractcd`** (cue **and** bin) + create→extract round-trip. (chdman writes the cue in text mode
       → CRLF on Windows, LF on Linux; chd-rs matches the host platform.)
-- [x] **Tests** ✅ — `createcd -c cdzl`/`cdlz` byte-identical (single MODE1/2352 partial-last-hunk,
-      **multi-track MODE1+AUDIO+in-file pregap**, flat-ISO MODE1/2048); `cdfl` round-trip + byte-
-      identical vs glibc chdman; **`extractcd` cue+bin byte-identical** (single + multi-track);
-      `list_tracks` reads CHT2.
-- [ ] GDI/Nero parser; `.gdi`/split-bin extract; `extract_to_iso`; `CdCookedReader`
+- [x] **`create_from_gdi` + `extract_to_gdi`** ✅ — Sega Dreamcast `.gdi` (GD-ROM): port of
+      `parse_gdi` + `do_extract_cd` `MODE_GDI`. `padframes` area-gap fill, audio swap, `CHGD`
+      metadata, split per-track files (`<stem>NN.bin`/`.raw`). **Byte-identical to `chdman`** both
+      ways (3-track data/audio/data synthetic GDI).
+- [x] **`extract_to_iso` + `CdCookedReader`** ✅ — single MODE1 track's cooked 2048-byte user data
+      (sync/ECC stripped at offset 16 for raw, 0 for cooked); `CdCookedReader` is `Read+Seek`.
+      Round-trip verified (chdman has no CD→iso command).
+- [x] **Tests** ✅ — `createcd -c cdzl`/`cdlz` byte-identical (single/multi-track/ISO); `cdfl`
+      byte-identical vs glibc chdman; **`extractcd` cue+bin**, **`createcd`/`extractcd` GDI**, all
+      byte-identical; `extract_to_iso`/`CdCookedReader` round-trip; `list_tracks` reads CHT2.
+- [ ] Nero (`.nrg`) TOC parser — **deferred**: binary format, no way to generate a fixture (chdman
+      can't write `.nrg`), so it can't be verified to the byte-identity bar. Documented gap.
 
 ## M7 — Parent/diff + `HdImage`
 
@@ -267,6 +274,18 @@ Tracked in detail in [docs/libchdman-parity.md](docs/libchdman-parity.md). Phase
 
 ## Session log
 
+- 2026-06-20: **CD niche formats — GDI (both ways), `extract_to_iso`, `CdCookedReader`.** (1)
+  **`CdCookedReader`** (`Read+Seek` over a MODE1 track's cooked 2048-byte user data; sync/ECC stripped
+  at offset 16 for raw, 0 for cooked) + **`extract_to_iso`** (single MODE1 → raw iso) — round-trip
+  verified. (2) **`create_from_gdi`** (port of `parse_gdi`): `.gdi` index → GD-ROM CHD; added
+  `padframes` to the track model (area-gap fill: read only `frames-padframes` real sectors,
+  zero-fill the rest), `CHGD` metadata (`GDROM_TRACK_METADATA_FORMAT`, a `PAD:` field + plain pregap
+  type) via a `gdrom` flag through `build_cd`. (3) **`extract_to_gdi`** (port of `do_extract_cd`
+  `MODE_GDI`): `.gdi` index + split `<stem>NN.bin`/`.raw` per-track files; extended the readback
+  parser for `CHGD`/`CHGT` + `PAD`. **Both GDI directions byte-identical to chdman** (synthetic
+  3-track data/audio/data GDI w/ small LBA gaps). **Nero (`.nrg`) deferred** — binary format,
+  unverifiable without a fixture chdman can't produce. 62 lib/compat tests green (+4). The CD
+  create/extract surface is now complete bar Nero.
 - 2026-06-20: **`extractcd` (cue/bin) + `list_tracks` — byte-identical to `chdman extractcd`.**
   `cd::extract_to_cue` (port of `do_extract_cd` `MODE_CUEBIN` + `output_track_metadata`,
   chdman.cpp:2638/1525): read the `CHT2`/`CHTR` track table (`read_track_metas`, port of
