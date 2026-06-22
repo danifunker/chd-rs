@@ -10,9 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Build + test on all three desktop platforms. The default (read-only) build uses only
-  # crates.io deps; the `write`/`write-zstd` encode features depend on the sibling bit-exact
-  # codec crates via path deps (`../../<crate>`), so we clone them next to this checkout first.
+  # Build + test on all three desktop platforms. All deps (including the `write`/`write-zstd`
+  # encode features' bit-exact sibling codec crates) resolve from crates.io — no local checkout.
   test:
     strategy:
       fail-fast: false
@@ -24,29 +23,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # The write feature's optional deps are local path deps on the sibling crates. Cargo reads
-      # every dependency manifest during resolution (even optional ones behind disabled features),
-      # so they must exist on disk for *any* build. They live one level above the repo root
-      # (`../../<crate>` from chd-rs/chd-rs == <parent-of-workspace>/<crate>), so clone them into
-      # the parent of the checkout, pinned to the tags this repo was developed against.
-      # (When the codec crates stabilise on crates.io, switch these to version deps and drop this.)
-      - name: Clone sibling codec crates
-        shell: bash
-        run: |
-          cd "${GITHUB_WORKSPACE}/.."
-          git clone --depth 1 --branch v0.2301.0 https://github.com/danifunker/lzma-sdk-rs.git
-          git clone --depth 1 --branch v0.143.0  https://github.com/danifunker/libflac-rs.git
-          git clone --depth 1 --branch v0.131.0  https://github.com/danifunker/zlib-bitexact-rs.git
-          git clone --depth 1 --branch v0.155.0  https://github.com/danifunker/libzstd-bitexact-rs.git
-
       # Read-only (default) build — the core product, no encode code. Scoped to the `chd` package
       # (the workspace also has rchdman + a C-backed capi crate that CI doesn't cover).
       - run: cargo build -p chd
 
-      # Encode side: build + run the unit tests (codec round-trips, hd/dvd/copy, codec module,
-      # doctests). The `chdman_compat` byte-identity tests need a real chdman binary and are gated
-      # behind `chdman_compat_tests` (not enabled here). The `read_*` tests need large CHD fixtures
-      # that aren't in the repo (.testimages/ is gitignored), so skip them.
+      # Encode side: build + run the unit tests (codec round-trips, hd/cd/dvd/copy, parent/diff,
+      # verify, codec module, doctests). The `chdman_compat` byte-identity tests need a real chdman
+      # binary and are gated behind `chdman_compat_tests` (not enabled here). The `read_*` tests
+      # need large CHD fixtures that aren't in the repo (.testimages/ is gitignored), so skip them.
       - run: cargo test -p chd --features write-zstd -- --skip tests::read
 
   # Formatting gate. (clippy is intentionally not `-D warnings` yet — the legacy read-side code
@@ -58,14 +42,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      # `cargo fmt -p chd` runs `cargo metadata`, which resolves the workspace — including the
-      # write feature's sibling path deps — so they must be present even for a formatting check.
-      - name: Clone sibling codec crates
-        shell: bash
-        run: |
-          cd "${GITHUB_WORKSPACE}/.."
-          git clone --depth 1 --branch v0.2301.0 https://github.com/danifunker/lzma-sdk-rs.git
-          git clone --depth 1 --branch v0.143.0  https://github.com/danifunker/libflac-rs.git
-          git clone --depth 1 --branch v0.131.0  https://github.com/danifunker/zlib-bitexact-rs.git
-          git clone --depth 1 --branch v0.155.0  https://github.com/danifunker/libzstd-bitexact-rs.git
       - run: cargo fmt -p chd --check

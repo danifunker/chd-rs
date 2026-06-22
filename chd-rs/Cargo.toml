@@ -73,20 +73,19 @@ claxon = "0.4"
 bitreader = "0.3.6"
 ruzstd = "0.8.0"
 
-# bit-exact pure-Rust encoders (write feature). Sibling crates; path deps for local
-# dev, switch to crates.io version deps once published. See docs/codec-ports/.
-lzma-sdk-rs = { path = "../../lzma-sdk-rs", optional = true }
-# Published: zlib-bitexact-rs = "0.131" (byte-exact with stock zlib 1.3.1, chdman's version).
-# Path dep for local dev, consistent with the sibling encoder crates.
-zlib-bitexact-rs = { path = "../../zlib-bitexact-rs", optional = true }
-# Bit-exact pure-Rust libFLAC 1.4.3 encoder (raw `flac` + DVD-default codec). Float
-# parity is validated vs glibc libm; byte-identity to an MSVC/Windows chdman is not
-# guaranteed (output is always round-trip-correct). See docs/codec-ports/libflac-rs.md.
-libflac-rs = { path = "../../libflac-rs", optional = true }
+# Bit-exact pure-Rust codec encoders (write feature), each byte-exact with the C library
+# chdman 0.288 uses. Published on crates.io; see docs/codec-ports/. For co-developing one of
+# these alongside chd-rs, add an (uncommitted) `[patch.crates-io]` pointing at its working copy.
+lzma-sdk-rs = { version = "0.2301", optional = true } # LZMA SDK 23.01
+zlib-bitexact-rs = { version = "0.131", optional = true } # stock zlib 1.3.1
+# Bit-exact pure-Rust libFLAC 1.4.3 encoder (raw `flac` + DVD-default codec). Float parity is
+# validated vs glibc libm; byte-identity to an MSVC/Windows chdman is not guaranteed (output is
+# always round-trip-correct). See docs/codec-ports/libflac-rs.md.
+libflac-rs = { version = "0.143", optional = true }
 sha1 = { version = "0.10", optional = true }
-# Published form: libzstd-bitexact-rs = "=0.155" (the 1.5.5-targeted line; a bare
-# version would resolve to the 0.157.x / zstd-1.5.7 line).
-libzstd-bitexact-rs = { path = "../../libzstd-bitexact-rs", optional = true }
+# Pinned `=0.155`: the zstd-1.5.5-targeted line (chdman's version). A bare requirement would
+# resolve to the 0.157.x / zstd-1.5.7 line, which is NOT byte-exact with chdman 0.288.
+libzstd-bitexact-rs = { version = "=0.155", optional = true }
 
 zstd-safe = { version = "7.2.0", optional = true }
 # lending-iterator
