@@ -103,6 +103,69 @@ impl<F: Read + Seek> Chd<F> {
         &self.map
     }
 
+    /// Returns an aggregate [`ChdInfo`](crate::ChdInfo) snapshot of this CHD's header and metadata
+    /// (the data chdman's `info` subcommand reports; mirrors libchdman-rs's `Chd::info`).
+    ///
+    /// Walks the metadata once to derive the tag list, track count, and the `is_hd`/`is_cd`/
+    /// `is_gd`/`is_dvd`/`is_av` type flags (each a metadata-tag-presence check, exactly as MAME's
+    /// `check_is_*`).
+    pub fn info(&mut self) -> Result<crate::ChdInfo> {
+        use crate::make_tag;
+        use crate::metadata::MetadataTag;
+
+        let h = self.header();
+        let version = h.version() as u32;
+        let hunk_bytes = h.hunk_size();
+        let unit_bytes = h.unit_bytes();
+        let hunk_count = h.hunk_count();
+        let logical_bytes = h.logical_bytes();
+        let codecs = h.compression();
+        let sha1 = h.sha1().unwrap_or([0u8; 20]);
+        let raw_sha1 = h.raw_sha1().unwrap_or([0u8; 20]);
+        let parent_sha1 = h.parent_sha1().unwrap_or([0u8; 20]);
+        let has_parent = h.has_parent();
+        let compressed = codecs[0] != 0;
+
+        // Walk the metadata once, recording each entry's tag + its per-tag index.
+        let mut metadata_tags: Vec<(u32, u32)> = Vec::new();
+        let mut per_tag: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for m in self.metadata_refs() {
+            let tag = m.metatag();
+            let idx = per_tag.entry(tag).or_insert(0);
+            metadata_tags.push((tag, *idx));
+            *idx += 1;
+        }
+
+        let has = |t: &[u8; 4]| metadata_tags.iter().any(|&(tag, _)| tag == make_tag(t));
+        let count = |t: &[u8; 4]| {
+            metadata_tags
+                .iter()
+                .filter(|&&(tag, _)| tag == make_tag(t))
+                .count() as u32
+        };
+
+        Ok(crate::ChdInfo {
+            version,
+            hunk_bytes,
+            unit_bytes,
+            hunk_count,
+            logical_bytes,
+            codecs,
+            sha1,
+            raw_sha1,
+            parent_sha1,
+            track_count: count(b"CHT2") + count(b"CHTR") + count(b"CHGD"),
+            is_hd: has(b"GDDD"),
+            is_cd: has(b"CHCD") || has(b"CHTR") || has(b"CHT2"),
+            is_gd: has(b"CHGT") || has(b"CHGD"),
+            is_dvd: has(b"DVD "),
+            is_av: has(b"AVAV"),
+            metadata_tags,
+            compressed,
+            has_parent,
+        })
+    }
+
     /// Returns a reference to the given hunk in this CHD file.
     ///
     /// If the requested hunk is larger than the number of hunks in the CHD file,
@@ -121,6 +184,63 @@ impl<F: Read + Seek> Chd<F> {
     pub fn get_hunksized_buffer(&self) -> Vec<u8> {
         let hunk_size = self.header.hunk_size() as usize;
         vec![0u8; hunk_size]
+    }
+
+    /// Verify a compressed CHD's integrity by recomputing its SHA-1 checksums and comparing them to
+    /// the header (chdman `verify`). Decompresses every hunk to recompute the **raw** SHA-1 (over the
+    /// logical, unpadded bytes) and the **overall** SHA-1 (`SHA1(raw_sha1 ‖ sorted checksummed
+    /// metadata hashes)`); the returned [`VerifyResult`](crate::VerifyResult) carries both computed
+    /// and expected values (check [`is_valid`](crate::VerifyResult::is_valid)).
+    ///
+    /// Returns [`Error::UnsupportedFormat`] for an **uncompressed** CHD (those carry no stored
+    /// checksum — chdman likewise refuses). If the CHD references a parent, it must have been opened
+    /// with that parent (parent-ref hunks are read through it). Available with the `verify` feature.
+    #[cfg(feature = "verify")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "verify")))]
+    pub fn verify(&mut self) -> Result<crate::VerifyResult> {
+        use sha1::{Digest, Sha1};
+
+        if !self.header.is_compressed() {
+            return Err(Error::UnsupportedFormat);
+        }
+        let expected_raw_sha1 = self
+            .header
+            .raw_sha1()
+            .or_else(|| self.header.sha1())
+            .ok_or(Error::UnsupportedFormat)?;
+        let expected_sha1 = self.header.sha1().unwrap_or(expected_raw_sha1);
+        let logical = self.header.logical_bytes();
+        let hunk_bytes = self.header.hunk_size() as u64;
+        let hunk_count = self.header.hunk_count();
+
+        // Collect the metadata first (owns its bytes), then hash the hunks.
+        let metas: Vec<crate::metadata::Metadata> = self.metadata_refs().try_into()?;
+
+        // raw_sha1 is over the *logical* (unpadded) bytes — drop the final hunk's zero padding.
+        let mut hasher = Sha1::new();
+        let mut comp = Vec::new();
+        let mut buf = vec![0u8; hunk_bytes as usize];
+        let mut remaining = logical;
+        for i in 0..hunk_count {
+            self.hunk(i)?.read_hunk_in(&mut comp, &mut buf)?;
+            let take = remaining.min(hunk_bytes) as usize;
+            hasher.update(&buf[..take]);
+            remaining -= take as u64;
+        }
+        let computed_raw_sha1: [u8; 20] = hasher.finalize().into();
+        let computed_sha1 = crate::metadata::overall_sha1(
+            &computed_raw_sha1,
+            metas
+                .iter()
+                .map(|m| (m.metatag, m.flags, m.value.as_slice())),
+        );
+
+        Ok(crate::VerifyResult {
+            computed_raw_sha1,
+            computed_sha1,
+            expected_raw_sha1,
+            expected_sha1,
+        })
     }
 
     #[cfg_attr(docsrs, doc(cfg(unstable_lending_iterators)))]
@@ -456,5 +576,113 @@ impl Codecs {
                 _ => None,
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "write"))]
+mod verify_tests {
+    use crate::Chd;
+    use std::io::Cursor;
+
+    /// Deterministic mixed-compressibility bytes.
+    fn make_input(len: usize) -> Vec<u8> {
+        let mut v = Vec::with_capacity(len);
+        let mut x: u32 = 0x2545_f491;
+        for i in 0..len {
+            let b = match (i / 96) % 3 {
+                0 => 0u8,
+                1 => b"the quick brown fox "[i % 20],
+                _ => {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    (x & 0xff) as u8
+                }
+            };
+            v.push(b);
+        }
+        v
+    }
+
+    /// `verify()` accepts a freshly written compressed CHD, and detects a corrupted stored raw SHA-1
+    /// (data path) and a corrupted metadata payload (overall-SHA-1 path) independently.
+    #[test]
+    fn verify_detects_data_and_metadata_corruption() {
+        // createhd (256 KiB) writes a GDDD record → exercises the metadata-inclusive overall SHA-1.
+        let input = make_input(256 * 1024);
+        let mut cur = Cursor::new(Vec::new());
+        crate::hd::create_from_reader(
+            &input[..],
+            &mut cur,
+            crate::hd::HdCreateOptions {
+                codecs: [crate::CHD_CODEC_ZLIB, 0, 0, 0],
+                ..Default::default()
+            },
+            &mut |_| {},
+            &|| false,
+        )
+        .unwrap();
+        let bytes = cur.into_inner();
+
+        // pristine → valid
+        let mut chd = Chd::open(Cursor::new(bytes.clone()), None).unwrap();
+        let r = chd.verify().unwrap();
+        assert!(r.is_valid(), "fresh CHD should verify: {r:?}");
+
+        // corrupt the stored raw SHA-1 (header byte 64) → raw mismatch, overall mismatch.
+        let mut c1 = bytes.clone();
+        c1[64] ^= 0xff;
+        let r1 = Chd::open(Cursor::new(c1), None).unwrap().verify().unwrap();
+        assert!(
+            !r1.raw_sha1_valid(),
+            "corrupted stored raw SHA-1 must be detected"
+        );
+        assert!(!r1.is_valid());
+
+        // corrupt a metadata payload byte → overall mismatch, but the data (raw) is intact.
+        let meta_off = u64::from_be_bytes(bytes[48..56].try_into().unwrap()) as usize;
+        let mut c2 = bytes.clone();
+        c2[meta_off + 16 + 8] ^= 0xff; // 16-byte entry header, then into the GDDD payload
+        let r2 = Chd::open(Cursor::new(c2), None).unwrap().verify().unwrap();
+        assert!(
+            r2.raw_sha1_valid(),
+            "data is intact so raw SHA-1 should still match"
+        );
+        assert!(
+            !r2.overall_sha1_valid(),
+            "corrupted metadata must fail the overall SHA-1"
+        );
+        assert!(!r2.is_valid());
+    }
+
+    /// `verify()` hashes the *logical* (unpadded) bytes: a createraw CHD with a partial last hunk
+    /// (no metadata, so overall = SHA1(raw_sha1)) verifies.
+    #[test]
+    fn verify_partial_last_hunk_and_uncompressed() {
+        // 5 full 4096-hunks + 3 × 512 units = partial last hunk.
+        let input = make_input(4096 * 5 + 512 * 3);
+        let mut cur = Cursor::new(Vec::new());
+        crate::write::write_raw(
+            &mut cur,
+            &input,
+            4096,
+            512,
+            &[crate::header::CodecType::ZLibV5],
+        )
+        .unwrap();
+        let mut chd = Chd::open(Cursor::new(cur.into_inner()), None).unwrap();
+        assert!(
+            chd.verify().unwrap().is_valid(),
+            "partial-last-hunk CHD should verify (raw SHA-1 over logical bytes)"
+        );
+
+        // uncompressed CHDs carry no checksum → verify refuses.
+        let mut cur2 = Cursor::new(Vec::new());
+        crate::write::write_raw_uncompressed(&mut cur2, &input, 4096, 512).unwrap();
+        let mut chd2 = Chd::open(Cursor::new(cur2.into_inner()), None).unwrap();
+        assert!(matches!(
+            chd2.verify(),
+            Err(crate::Error::UnsupportedFormat)
+        ));
     }
 }
