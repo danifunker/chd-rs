@@ -26,7 +26,7 @@ use text_io::try_scan;
 
 /// The types of compression codecs supported in a CHD file.
 #[repr(u32)]
-#[derive(FromPrimitive, Debug)]
+#[derive(FromPrimitive, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecType {
     /// No compression.
     None = 0,
@@ -105,6 +105,53 @@ impl CodecType {
                 CdZstdCodec::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionCodec>)
             }
             #[allow(unreachable_patterns)]
+            _ => Err(Error::UnsupportedFormat),
+        }
+    }
+
+    /// Initializes the encoder for this codec type and the provided hunk size.
+    ///
+    /// The encode mirror of [`CodecType::init`]. Codecs are added per milestone; types
+    /// without an encoder yet return [`Error::UnsupportedFormat`]. Available with the
+    /// `write` feature.
+    #[cfg(feature = "write")]
+    pub(crate) fn init_encoder(
+        &self,
+        hunk_size: u32,
+    ) -> Result<Box<dyn crate::compression::CompressionEncoder>> {
+        use crate::compression::codecs::{
+            HuffmanEncoder, LzmaEncoder, NoneEncoder, RawFlacEncoder, ZlibEncoder,
+        };
+        use crate::compression::CodecEncodeImplementation;
+        use crate::compression::CompressionEncoder;
+        match self {
+            CodecType::None => {
+                NoneEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
+            }
+            CodecType::Zlib | CodecType::ZlibPlus | CodecType::ZLibV5 => {
+                ZlibEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
+            }
+            CodecType::LzmaV5 => {
+                LzmaEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
+            }
+            CodecType::HuffV5 => {
+                HuffmanEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
+            }
+            CodecType::FlacV5 => {
+                RawFlacEncoder::new(hunk_size).map(|x| Box::new(x) as Box<dyn CompressionEncoder>)
+            }
+            CodecType::FlacCdV5 => crate::compression::codecs::CdFlacEncoder::new(hunk_size)
+                .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
+            CodecType::ZLibCdV5 => crate::compression::codecs::CdZlibEncoder::new(hunk_size)
+                .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
+            CodecType::LzmaCdV5 => crate::compression::codecs::CdLzmaEncoder::new(hunk_size)
+                .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
+            #[cfg(feature = "write-zstd")]
+            CodecType::ZstdV5 => crate::compression::codecs::ZstdEncoder::new(hunk_size)
+                .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
+            #[cfg(feature = "write-zstd")]
+            CodecType::ZstdCdV5 => crate::compression::codecs::CdZstdEncoder::new(hunk_size)
+                .map(|x| Box::new(x) as Box<dyn CompressionEncoder>),
             _ => Err(Error::UnsupportedFormat),
         }
     }
@@ -465,6 +512,21 @@ impl Header {
             Header::V4Header(c) => Some(c.raw_sha1),
             Header::V5Header(c) => Some(c.raw_sha1),
             _ => None,
+        }
+    }
+
+    /// Returns the compression codecs as a 4-slot array of FourCCs.
+    ///
+    /// V5 CHDs store up to four codec FourCCs (slot 0 the primary; `0` = unused). Legacy (V1-4)
+    /// CHDs have a single codec, returned in slot 0 with the rest zero. A slot-0 value of `0`
+    /// (`CHD_CODEC_NONE`) means the CHD is uncompressed.
+    pub fn compression(&self) -> [u32; 4] {
+        match self {
+            Header::V1Header(c) => [c.compression, 0, 0, 0],
+            Header::V2Header(c) => [c.compression, 0, 0, 0],
+            Header::V3Header(c) => [c.compression, 0, 0, 0],
+            Header::V4Header(c) => [c.compression, 0, 0, 0],
+            Header::V5Header(c) => c.compression,
         }
     }
 

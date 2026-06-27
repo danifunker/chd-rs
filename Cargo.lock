@@ -103,6 +103,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "block-buffer"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
+dependencies = [
+ "hybrid-array",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -183,12 +192,17 @@ dependencies = [
  "crc",
  "flate2",
  "lending-iterator",
+ "libflac-rs",
+ "libzstd-bitexact-rs",
  "lzma-rs-perf-exp",
+ "lzma-sdk-rs",
  "nougat",
  "num-derive",
  "num-traits",
  "ruzstd",
+ "sha1 0.11.0",
  "text_io",
+ "zlib-bitexact-rs",
  "zstd-safe",
 ]
 
@@ -268,10 +282,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "cpufeatures"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
 dependencies = [
  "libc",
 ]
@@ -311,13 +340,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypto-common"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
+dependencies = [
+ "hybrid-array",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
- "block-buffer",
- "crypto-common",
+ "block-buffer 0.10.4",
+ "crypto-common 0.1.6",
+]
+
+[[package]]
+name = "digest"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
+dependencies = [
+ "block-buffer 0.12.1",
+ "const-oid",
+ "crypto-common 0.2.2",
 ]
 
 [[package]]
@@ -439,6 +488,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hybrid-array"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9155a582abd142abc056962c29e3ce5ff2ad5469f4246b537ed42c5deba857da"
+dependencies = [
+ "typenum",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -505,6 +563,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c19937216e9d3aa9956d9bb8dfc0b0c8beb6058fc4f7a4dc4d850edf86a237d6"
 
 [[package]]
+name = "libflac-rs"
+version = "0.143.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "103950d4bbd33a11347d4442989989dd5b89a36248267690feb9cef4b3a51ab3"
+
+[[package]]
 name = "libloading"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -534,6 +598,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libzstd-bitexact-rs"
+version = "0.155.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6b2a3d89a7fbdbb3c4075e1d59e9c90fb81bf0443044afd8f489c45317509c2"
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -554,6 +624,12 @@ dependencies = [
  "byteorder",
  "crc",
 ]
+
+[[package]]
+name = "lzma-sdk-rs"
+version = "0.2301.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bcd2b73b761b866258ca43401fa0d3119f54fbff51132539e8d1d2b05a73a53"
 
 [[package]]
 name = "macro_rules_attribute"
@@ -746,7 +822,7 @@ dependencies = [
  "clap",
  "hex",
  "num-traits",
- "sha1",
+ "sha1 0.10.6",
  "thousands",
 ]
 
@@ -852,8 +928,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
 dependencies = [
  "cfg-if",
- "cpufeatures",
- "digest",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -947,9 +1034,9 @@ checksum = "e7b17f197b3050ba473acf9181f7b1d3b66d1cf7356c6cc57886662276e65908"
 
 [[package]]
 name = "typenum"
-version = "1.18.0"
+version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "unicode-ident"
@@ -1084,6 +1171,12 @@ checksum = "6f42320e61fe2cfd34354ecb597f86f413484a798ba44a8ca1165c58d42da6c1"
 dependencies = [
  "bitflags 2.9.0",
 ]
+
+[[package]]
+name = "zlib-bitexact-rs"
+version = "0.131.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2823c223ca3e7ae8232406ca377105b307cc5ad9f63179e05e134e46817ca6c2"
 
 [[package]]
 name = "zlib-rs"

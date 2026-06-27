@@ -164,3 +164,60 @@ impl CodecImplementation for LzmaCodec {
         Ok(DecompressResult::new(len, read.position() as usize))
     }
 }
+
+/// LZMA (lzma) compression codec.
+///
+/// Backed by [`lzma-sdk-rs`](https://docs.rs/lzma-sdk-rs), a bit-exact pure-Rust port of the
+/// 7-zip LZMA SDK 23.01 encoder. Emits a raw LZMA stream (no header, no end marker) using the
+/// CHD props (lc=3/lp=0/pb=2, dictionary reduced to the hunk size) — byte-identical to MAME's
+/// `LzmaEnc_MemEncode`. `LzmaProps::chd_for_hunk` reproduces the same dictionary derivation as
+/// [`get_lzma_dict_size`] above.
+#[cfg(feature = "write")]
+pub struct LzmaEncoder {
+    props: lzma_sdk_rs::LzmaProps,
+}
+
+#[cfg(feature = "write")]
+impl crate::compression::CodecEncodeImplementation for LzmaEncoder {
+    fn new(hunk_size: u32) -> Result<Self> {
+        Ok(LzmaEncoder {
+            props: lzma_sdk_rs::LzmaProps::chd_for_hunk(hunk_size),
+        })
+    }
+
+    fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize> {
+        let out = lzma_sdk_rs::encode(input, &self.props);
+        if out.len() > output.len() {
+            return Err(Error::CompressionError);
+        }
+        output[..out.len()].copy_from_slice(&out);
+        Ok(out.len())
+    }
+}
+
+#[cfg(feature = "write")]
+impl crate::compression::CompressionEncoder for LzmaEncoder {}
+
+#[cfg(all(test, feature = "write"))]
+mod tests {
+    use super::*;
+    use crate::compression::{CodecEncodeImplementation, CodecImplementation};
+
+    /// Proves the cross-crate integration: lzma-sdk-rs's encoder output is decodable by
+    /// chd-rs's existing LZMA decoder with the CHD dictionary params, and round-trips.
+    #[test]
+    fn lzma_encode_roundtrips_through_decoder() {
+        let hunk: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+
+        let mut enc = LzmaEncoder::new(4096).unwrap();
+        let mut comp = vec![0u8; 4096];
+        let n = enc.compress(&hunk, &mut comp).unwrap();
+        assert!(n < hunk.len(), "expected compression to shrink the hunk");
+
+        let mut dec = LzmaCodec::new(4096).unwrap();
+        let mut out = vec![0u8; 4096];
+        let res = dec.decompress(&comp[..n], &mut out).unwrap();
+        assert_eq!(res.total_out(), 4096);
+        assert_eq!(out, hunk);
+    }
+}

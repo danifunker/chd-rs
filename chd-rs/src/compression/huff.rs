@@ -50,3 +50,56 @@ impl CompressionCodecType for HuffmanCodec {
 }
 
 impl CompressionCodec for HuffmanCodec {}
+
+/// MAME 8-bit Huffman (huff) compression codec.
+///
+/// Encodes via [`crate::huffman_encode::encode_8bit`], a faithful port of MAME's
+/// `huffman_8bit_encoder` (256 codes, 16-bit max) — byte-identical to chdman for a given hunk.
+#[cfg(feature = "write")]
+pub struct HuffmanEncoder;
+
+#[cfg(feature = "write")]
+impl crate::compression::CodecEncodeImplementation for HuffmanEncoder {
+    fn new(_: u32) -> Result<Self> {
+        Ok(HuffmanEncoder)
+    }
+
+    fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize> {
+        let out = crate::huffman_encode::encode_8bit(input)
+            .map_err(|_| crate::error::Error::CompressionError)?;
+        if out.len() > output.len() {
+            return Err(crate::error::Error::CompressionError);
+        }
+        output[..out.len()].copy_from_slice(&out);
+        Ok(out.len())
+    }
+}
+
+#[cfg(feature = "write")]
+impl crate::compression::CompressionEncoder for HuffmanEncoder {}
+
+#[cfg(all(test, feature = "write"))]
+mod tests {
+    use super::*;
+    use crate::compression::{CodecEncodeImplementation, CodecImplementation};
+
+    #[test]
+    fn huff_encode_roundtrips_through_decoder() {
+        // Skewed distribution so Huffman shrinks it (result fits a hunk-sized buffer) and the
+        // tree is non-trivial.
+        let hunk: Vec<u8> = (0..4096u32)
+            .map(|i| if i % 3 == 0 { (i % 11) as u8 } else { 0 })
+            .collect();
+
+        let mut enc = HuffmanEncoder::new(4096).unwrap();
+        let mut comp = vec![0u8; 4096];
+        let n = enc.compress(&hunk, &mut comp).unwrap();
+        assert!(n < hunk.len(), "expected Huffman to shrink the skewed hunk");
+
+        let mut dec = HuffmanCodec::new(4096).unwrap();
+        let mut out = vec![0u8; 4096];
+        let res = dec.decompress(&comp[..n], &mut out).unwrap();
+        assert_eq!(res.total_out(), 4096);
+        assert_eq!(out, hunk);
+    }
+}
