@@ -518,12 +518,9 @@ checksum = "c19937216e9d3aa9956d9bb8dfc0b0c8beb6058fc4f7a4dc4d850edf86a237d6"
 
 [[package]]
 name = "libflac-rs"
-version = "0.143.0"
+version = "0.143.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2c99ea31135c0fbe89c4250975be550ef0d6d8c30eeb63468476f6526f1d726"
-dependencies = [
- "cc",
-]
+checksum = "103950d4bbd33a11347d4442989989dd5b89a36248267690feb9cef4b3a51ab3"
 
 [[package]]
 name = "libloading"
@@ -556,9 +553,9 @@ dependencies = [
 
 [[package]]
 name = "libzstd-bitexact-rs"
-version = "0.155.0"
+version = "0.155.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcdbf9f739e6df84ee3f90704d7f447819e355b090b4dc845e521e3e9f1f7259"
+checksum = "d6b2a3d89a7fbdbb3c4075e1d59e9c90fb81bf0443044afd8f489c45317509c2"
 
 [[package]]
 name = "linux-raw-sys"
@@ -584,12 +581,9 @@ dependencies = [
 
 [[package]]
 name = "lzma-sdk-rs"
-version = "0.2301.0"
+version = "0.2301.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bc9569e7ea9498c0314a5733935f246f324b615a1145ced6665b98d9d7de673"
-dependencies = [
- "cc",
-]
+checksum = "2bcd2b73b761b866258ca43401fa0d3119f54fbff51132539e8d1d2b05a73a53"
 
 [[package]]
 name = "macro_rules_attribute"
@@ -1129,12 +1123,9 @@ dependencies = [
 
 [[package]]
 name = "zlib-bitexact-rs"
-version = "0.131.0"
+version = "0.131.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54f4515d95508101b7c7b14f1807d5e7bb2b2a1debb75b2f9d3d95fb376e3f42"
-dependencies = [
- "cc",
-]
+checksum = "2823c223ca3e7ae8232406ca377105b307cc5ad9f63179e05e134e46817ca6c2"
 
 [[package]]
 name = "zlib-rs"

@@ -71,16 +71,17 @@ ruzstd = "0.8.0"
 # Bit-exact pure-Rust codec encoders (write feature), each byte-exact with the C library
 # chdman 0.288 uses. Published on crates.io. For co-developing one of these alongside chd-rs, add
 # an (uncommitted) `[patch.crates-io]` pointing at its working copy.
-lzma-sdk-rs = { version = "0.2301", optional = true } # LZMA SDK 23.01
-zlib-bitexact-rs = { version = "0.131", optional = true } # stock zlib 1.3.1
+lzma-sdk-rs = { version = "0.2301.1", optional = true } # LZMA SDK 23.01
+zlib-bitexact-rs = { version = "0.131.1", optional = true } # stock zlib 1.3.1
 # Bit-exact pure-Rust libFLAC 1.4.3 encoder (raw `flac` + DVD-default codec). Float parity is
 # validated vs glibc libm; byte-identity to an MSVC/Windows chdman is not guaranteed (output is
 # always round-trip-correct).
-libflac-rs = { version = "0.143", optional = true }
+libflac-rs = { version = "0.143.1", optional = true }
 sha1 = { version = "0.10", optional = true }
-# Pinned `=0.155`: the zstd-1.5.5-targeted line (chdman's version). A bare requirement would
-# resolve to the 0.157.x / zstd-1.5.7 line, which is NOT byte-exact with chdman 0.288.
-libzstd-bitexact-rs = { version = "=0.155", optional = true }
+# Pinned `=0.155.1` (most recently published on the 0.155 line): the zstd-1.5.5 line is chdman's
+# version. The higher-numbered `0.157.x` line targets zstd 1.5.7 and is NOT byte-exact with chdman
+# 0.288 — so we track the most-recently-published 0.155 patch, not the highest version number.
+libzstd-bitexact-rs = { version = "=0.155.1", optional = true }
 
 zstd-safe = { version = "7.2.0", optional = true }
 # lending-iterator
