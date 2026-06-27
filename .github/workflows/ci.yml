@@ -28,9 +28,8 @@ jobs:
       - run: cargo build -p chd
 
       # Encode side: build + run the unit tests (codec round-trips, hd/cd/dvd/copy, parent/diff,
-      # verify, codec module, doctests). The `chdman_compat` byte-identity tests need a real chdman
-      # binary and are gated behind `chdman_compat_tests` (not enabled here). The `read_*` tests
-      # need large CHD fixtures that aren't in the repo (.testimages/ is gitignored), so skip them.
+      # verify, codec module, doctests). The `read_*` tests need large CHD fixtures that aren't in
+      # the repo (.testimages/ is gitignored), so skip them.
       - run: cargo test -p chd --features write-zstd -- --skip tests::read
 
   # Formatting gate. (clippy is intentionally not `-D warnings` yet — the legacy read-side code

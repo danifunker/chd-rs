@@ -52,11 +52,6 @@ c_zlib = ["std", "flate2/zlib-ng"]
 huff_write = []
 nonstandard_channel_count = []
 
-# dev-local bit-exact verification against a real chdman binary (resolves via the
-# CHDMAN env var, then C:\Tools\chdman\chdman.exe, then `chdman` on PATH). Never
-# enabled in CI; needs a chdman 0.288 install. Use with the `write` features.
-chdman_compat_tests = []
-
 [dependencies]
 byteorder = "1"
 num-traits = "0.2"

@@ -4,9 +4,7 @@ use std::ops::{Add, AddAssign};
 
 mod avhuff;
 mod cdrom;
-// `pub(crate)` so the dev-only chdman_compat tests can synthesize valid MODE1 sectors
-// (sync + ECC) when building CD test images. The trait inside is already `pub(crate)`.
-pub(crate) mod ecc;
+mod ecc;
 mod flac;
 mod huff;
 mod lzma;

@@ -212,31 +212,6 @@ pub(crate) fn build_parent_ref(
     ParentRef { map, sha1 }
 }
 
-/// Write a complete **compressed** V5 CHD containing `data`, using a single codec, intended to
-/// be byte-identical to `chdman createraw -c <codec> -hs <hunk_bytes> -us <unit_bytes>`.
-///
-/// Layout (verified against chdman 0.288): 124-byte header, then the compressed hunks
-/// byte-packed starting at offset 124, then the compressed map (`compress_v5_map`) at the end.
-/// Each hunk uses the codec if it shrinks below `hunk_bytes`, else is stored uncompressed
-/// (`COMPRESSION_NONE`). `raw_sha1 = SHA1(logical data)`, `sha1 = SHA1(raw_sha1)` (no metadata).
-///
-/// Self-hunk dedup matches chdman: a hunk byte-identical to an **earlier written** hunk is stored
-/// as a `COMPRESSION_SELF` reference (keyed by the whole-hunk crc16 + sha1, first occurrence wins)
-/// instead of being re-compressed. Parent-hunk refs are not yet supported (no-parent only). The
-/// codec must have an encoder (`init_encoder`).
-///
-/// This is the single-codec convenience over [`write_raw`]; it is exactly `write_raw(.., &[codec])`.
-#[cfg(test)]
-pub fn write_raw_compressed<W: Write + Seek>(
-    out: &mut W,
-    data: &[u8],
-    hunk_bytes: u32,
-    unit_bytes: u32,
-    codec: CodecType,
-) -> Result<()> {
-    write_raw(out, data, hunk_bytes, unit_bytes, &[codec])
-}
-
 /// Write a complete **compressed** V5 CHD using a codec **list** (1..=4 codecs), intended to be
 /// byte-identical to `chdman createraw -c <c0[,c1[,c2[,c3]]]>`.
 ///
@@ -245,7 +220,7 @@ pub fn write_raw_compressed<W: Write + Seek>(
 /// smaller** than the current best (so ties go to the earlier slot), with the baseline being
 /// "store uncompressed" at `hunk_bytes`. The winning slot index becomes the map's
 /// `COMPRESSION_TYPE_<slot>` (0..3); if no codec beats `hunk_bytes` the hunk is `COMPRESSION_NONE`.
-/// Self-hunk dedup is applied first (see [`write_raw_compressed`]). The header's `compression[0..4]`
+/// Self-hunk dedup is applied first. The header's `compression[0..4]`
 /// records the FourCCs in slot order (unused slots zero).
 ///
 /// `codecs` must be non-empty and at most 4 entries. For the uncompressed (no-codec) format use

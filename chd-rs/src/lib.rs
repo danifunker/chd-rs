@@ -115,9 +115,6 @@ mod huffman_encode;
 #[cfg(feature = "write")]
 mod write;
 
-#[cfg(all(test, feature = "chdman_compat_tests", feature = "write"))]
-mod chdman_compat;
-
 #[cfg(feature = "codec_api")]
 /// Implementations of decompression codecs used in MAME CHD.
 ///
