@@ -112,6 +112,9 @@ mod huffman;
 #[cfg(feature = "write")]
 mod huffman_encode;
 
+#[cfg(feature = "write")]
+mod write;
+
 #[cfg(feature = "codec_api")]
 /// Implementations of decompression codecs used in MAME CHD.
 ///
@@ -166,6 +169,23 @@ pub use codec::{
     CHD_CODEC_CD_LZMA, CHD_CODEC_CD_ZLIB, CHD_CODEC_CD_ZSTD, CHD_CODEC_FLAC, CHD_CODEC_HUFF,
     CHD_CODEC_LZMA, CHD_CODEC_NONE, CHD_CODEC_ZLIB, CHD_CODEC_ZSTD,
 };
+
+/// Progress of a create/compress operation, passed to the `progress` callback that the create
+/// functions in [`hd`](crate::hd) (and, later, `cd`/`dvd`/`copy`) take. Matches libchdman-rs's
+/// `CompressionProgress` field-for-field.
+///
+/// Available with the `write` feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+#[derive(Debug, Clone, Copy)]
+pub struct CompressionProgress {
+    /// Logical bytes processed so far (`0..=bytes_total`).
+    pub bytes_done: u64,
+    /// Total logical bytes to process.
+    pub bytes_total: u64,
+    /// Running compressed/logical size ratio (`0.0..=1.0+`); `1.0` before any data is processed.
+    pub ratio: f64,
+}
 
 #[cfg(feature = "unstable_lending_iterators")]
 #[cfg_attr(docsrs, doc(cfg(unstable_lending_iterators)))]
