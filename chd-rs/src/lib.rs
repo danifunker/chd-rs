@@ -187,6 +187,24 @@ pub struct CompressionProgress {
     pub ratio: f64,
 }
 
+/// Hard-disk CHD creation/extraction (chdman `createraw`/`extractraw`; `createhd`/`extracthd`
+/// geometry helpers). Available with the `write` feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod hd;
+
+/// Re-compress a CHD into a different codec set or hunk size (chdman `copy`). Available with the
+/// `write` feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod copy;
+
+/// DVD CHD creation/extraction (chdman `createdvd`/`extractdvd`). Available with the `write`
+/// feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod dvd;
+
 #[cfg(feature = "unstable_lending_iterators")]
 #[cfg_attr(docsrs, doc(cfg(unstable_lending_iterators)))]
 pub mod iter;
