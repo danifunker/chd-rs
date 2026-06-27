@@ -5,7 +5,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
-chd = { path = "../chd-rs", features = ["unstable_lending_iterators", "max_perf", "write-zstd"]}
+# NOTE: no `max_perf` — that would pull in `fast_zstd` → `zstd-safe`/`zstd-sys`, the only C in the
+# tree. Without it, zstd *decode* uses pure-Rust `ruzstd`; `fast_lzma` stays on via `default`.
+chd = { path = "../chd-rs", features = ["unstable_lending_iterators", "write-zstd"]}
 clap = { version = "3", features = ["derive"] }
 anyhow = "1"
 thousands = "0.2.0"
