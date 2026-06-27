@@ -24,6 +24,35 @@ pub mod codecs {
     pub use crate::compression::none::NoneCodec;
     pub use crate::compression::zlib::ZlibCodec;
     pub use crate::compression::zstd::ZstdCodec;
+
+    // Encoders (write feature). Added per-codec as milestones land.
+    #[cfg(feature = "write")]
+    pub use crate::compression::flac::CdFlacEncoder;
+    #[cfg(feature = "write")]
+    pub use crate::compression::flac::RawFlacEncoder;
+    #[cfg(feature = "write")]
+    pub use crate::compression::huff::HuffmanEncoder;
+    #[cfg(feature = "write")]
+    pub use crate::compression::lzma::LzmaEncoder;
+    #[cfg(feature = "write")]
+    pub use crate::compression::none::NoneEncoder;
+    #[cfg(feature = "write")]
+    pub use crate::compression::zlib::ZlibEncoder;
+    #[cfg(feature = "write-zstd")]
+    pub use crate::compression::zstd::ZstdEncoder;
+
+    // CD wrapper encoders (encode mirror of CdLzmaCodec/CdZlibCodec/CdZstdCodec).
+    #[cfg(feature = "write")]
+    pub use crate::compression::cdrom::CdEncoder;
+    /// CD Deflate (`cdzl`) compression codec: zlib sectors + zlib subcode.
+    #[cfg(feature = "write")]
+    pub type CdZlibEncoder = CdEncoder<ZlibEncoder, ZlibEncoder>;
+    /// CD LZMA (`cdlz`) compression codec: LZMA sectors + zlib subcode.
+    #[cfg(feature = "write")]
+    pub type CdLzmaEncoder = CdEncoder<LzmaEncoder, ZlibEncoder>;
+    /// CD Zstandard (`cdzs`) compression codec: zstd sectors + zstd subcode.
+    #[cfg(feature = "write-zstd")]
+    pub type CdZstdEncoder = CdEncoder<ZstdEncoder, ZstdEncoder>;
 }
 
 // unstable(trait_alias)
@@ -53,6 +82,35 @@ pub trait CodecImplementation {
     /// length as `hunk_size`, but this may be dependent on the codec
     /// implementation.
     fn decompress(&mut self, input: &[u8], output: &mut [u8]) -> Result<DecompressResult>;
+}
+
+/// Marker trait for a codec that can be used to compress (encode) a hunk.
+///
+/// The encode mirror of [`CompressionCodec`]. Available with the `write` feature.
+#[cfg(feature = "write")]
+pub trait CompressionEncoder: CodecEncodeImplementation + Send + Sync {}
+
+/// Trait for a CHD compression (encode) codec implementation.
+///
+/// The encode mirror of [`CodecImplementation`]. Available with the `write` feature.
+#[cfg(feature = "write")]
+pub trait CodecEncodeImplementation {
+    /// Creates a new encoder for the provided hunk size.
+    fn new(hunk_size: u32) -> Result<Self>
+    where
+        Self: Sized;
+
+    /// Compress `input` (one hunk) into `output`, returning the number of compressed
+    /// bytes written.
+    ///
+    /// `output` is sized to at least `hunk_size`. A codec that cannot produce output
+    /// that fits within `output` (i.e. it would expand the hunk) returns
+    /// [`Error::CompressionError`](crate::error::Error::CompressionError) so the
+    /// writer can fall back to a smaller codec or store the hunk uncompressed.
+    ///
+    /// Implementations must be **deterministic**: identical input must yield identical
+    /// output (the bit-for-bit parity goal depends on it).
+    fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize>;
 }
 
 /// The result of a chunk decompression operation.

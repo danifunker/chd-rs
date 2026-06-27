@@ -85,6 +85,11 @@ pub enum Error {
     UnsupportedFormat,
     /// Unknown error.
     Unknown,
+    /// A create/compress operation was cancelled via its `cancel` callback.
+    ///
+    /// chd-rs-specific (no libchdr equivalent); appended after [`Error::Unknown`] so the
+    /// existing libchdr-ABI discriminants are unchanged. Used by the write/create API.
+    Cancelled,
 }
 
 impl std::error::Error for Error {}
@@ -121,6 +126,7 @@ impl Display for Error {
             Error::NoAsyncOperation => f.write_str("no async operation in progress"),
             Error::UnsupportedFormat => f.write_str("unsupported format"),
             Error::Unknown => f.write_str("undocumented error"),
+            Error::Cancelled => f.write_str("operation cancelled"),
         }
     }
 }

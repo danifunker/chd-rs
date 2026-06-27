@@ -23,7 +23,8 @@
 //! [`Chd`](crate::Chd), direct iteration of hunks is not possible without
 //! Generic Associated Types. Instead, the hunk indices should be iterated over.
 //!
-//!```rust
+//!```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::fs::File;
 //! use std::io::BufReader;
 //! use chd::Chd;
@@ -42,28 +43,36 @@
 //!     let mut hunk = chd.hunk(hunk_num)?;
 //!     hunk.read_hunk_in(&mut cmp_buf, &mut hunk_buf)?;
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Iterating over metadata
 //! Metadata in a CHD file consists of a list of entries that contain offsets to the
-//! byte data of the metadata contents in the CHD file. The individual metadata entries
-//! can be iterated directly, but a reference to the source stream has to be provided to
-//! read the data.
-//! ```rust
+//! byte data of the metadata contents in the CHD file. The metadata entry references can be
+//! collected, then a reference to the source stream has to be provided to read each entry's data.
+//! ```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::fs::File;
 //! use std::io::BufReader;
 //! use chd::Chd;
 //!
 //! let mut f = BufReader::new(File::open("file.chd")?);
-//! let mut chd = Chd::open(&mut f, None)?;
-//! let entries = chd.metadata_refs()?;
+//! // Collect the metadata entry references, dropping the `Chd` to release the borrow on `f`.
+//! let entries: Vec<_> = {
+//!     let mut chd = Chd::open(&mut f, None)?;
+//!     chd.metadata_refs().collect()
+//! };
 //! for entry in entries {
 //!     let metadata = entry.read(&mut f)?;
 //! }
+//! # Ok(())
+//! # }
 //!```
 //! `Vec<Metadata>` implements `TryFrom<MetadataRefs>` so all metadata entries
 //! can be collected at once without requiring a reference to the file.
-//! ```rust
+//! ```rust,no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::fs::File;
 //! use std::io::BufReader;
 //! use chd::Chd;
@@ -73,7 +82,9 @@
 //! // chd takes ownership of f here
 //! let mut chd = Chd::open(f, None)?;
 //!
-//! let metadatas: Vec<Metadata> = chd.metadata_refs()?.try_into()?;
+//! let metadatas: Vec<Metadata> = chd.metadata_refs().try_into()?;
+//! # Ok(())
+//! # }
 //!```
 //!
 
@@ -97,6 +108,12 @@ pub mod huffman;
 
 #[cfg(not(feature = "huffman_api"))]
 mod huffman;
+
+#[cfg(feature = "write")]
+mod huffman_encode;
+
+#[cfg(feature = "write")]
+mod write;
 
 #[cfg(feature = "codec_api")]
 /// Implementations of decompression codecs used in MAME CHD.
@@ -139,10 +156,137 @@ pub(crate) use const_assert;
 
 pub use chdfile::{Chd, Hunk};
 pub use error::{Error, Result};
+pub mod codec;
 pub mod header;
 pub mod map;
 pub mod metadata;
 pub mod read;
+
+// Re-export the codec FourCC constants + helpers at the crate root, matching libchdman-rs's
+// surface so code written against it ports unchanged.
+pub use codec::{
+    codec_exists, codec_name, parse_codec_spec, CHD_CODEC_AVHUFF, CHD_CODEC_CD_FLAC,
+    CHD_CODEC_CD_LZMA, CHD_CODEC_CD_ZLIB, CHD_CODEC_CD_ZSTD, CHD_CODEC_FLAC, CHD_CODEC_HUFF,
+    CHD_CODEC_LZMA, CHD_CODEC_NONE, CHD_CODEC_ZLIB, CHD_CODEC_ZSTD,
+};
+
+/// Aggregate snapshot of a CHD's header + metadata, returned by [`Chd::info`]. Mirrors the data
+/// chdman's `info` subcommand reports (and libchdman-rs's `ChdInfo`).
+#[derive(Debug, Clone)]
+pub struct ChdInfo {
+    /// CHD format version (1–5).
+    pub version: u32,
+    /// Hunk size in bytes.
+    pub hunk_bytes: u32,
+    /// Unit (sector) size in bytes.
+    pub unit_bytes: u32,
+    /// Total hunk count.
+    pub hunk_count: u32,
+    /// Logical (uncompressed) size in bytes.
+    pub logical_bytes: u64,
+    /// Per-slot codec FourCCs (slot 0..=3); `0` means an unused slot / no compression.
+    pub codecs: [u32; 4],
+    /// Overall SHA-1 (zero if the header has none, e.g. an uncompressed CHD).
+    pub sha1: [u8; 20],
+    /// Raw (hunk-data) SHA-1 (zero if the header has none).
+    pub raw_sha1: [u8; 20],
+    /// Parent SHA-1 (zero if the CHD has no parent).
+    pub parent_sha1: [u8; 20],
+    /// Every metadata entry in stored order, paired with its per-tag index (so `(CHT2, 0)`,
+    /// `(CHT2, 1)`, … are distinguishable).
+    pub metadata_tags: Vec<(u32, u32)>,
+    /// Count of CD/GD track records (`CHT2` + `CHTR` + `CHGD`).
+    pub track_count: u32,
+    /// Whether the CHD is compressed (codec slot 0 is not `CHD_CODEC_NONE`).
+    pub compressed: bool,
+    /// Whether the CHD references a parent.
+    pub has_parent: bool,
+    /// Carries a `GDDD` hard-disk record.
+    pub is_hd: bool,
+    /// Carries CD-ROM records (`CHCD`/`CHTR`/`CHT2`).
+    pub is_cd: bool,
+    /// Carries GD-ROM records (`CHGT`/`CHGD`).
+    pub is_gd: bool,
+    /// Carries a `DVD ` record.
+    pub is_dvd: bool,
+    /// Carries A/V records (`AVAV`).
+    pub is_av: bool,
+}
+
+/// Result of [`Chd::verify`]: the SHA-1 checksums recomputed from the data, alongside the values
+/// stored in the header. Available with the `verify` feature.
+#[cfg(feature = "verify")]
+#[cfg_attr(docsrs, doc(cfg(feature = "verify")))]
+#[derive(Debug, Clone)]
+pub struct VerifyResult {
+    /// Raw SHA-1 recomputed over the logical (decompressed, unpadded) data.
+    pub computed_raw_sha1: [u8; 20],
+    /// Overall SHA-1 recomputed from the raw SHA-1 + the checksummed metadata.
+    pub computed_sha1: [u8; 20],
+    /// Raw-data SHA-1 stored in the header.
+    pub expected_raw_sha1: [u8; 20],
+    /// Overall (metadata-inclusive) SHA-1 stored in the header.
+    pub expected_sha1: [u8; 20],
+}
+
+#[cfg(feature = "verify")]
+impl VerifyResult {
+    /// Whether the recomputed raw-data SHA-1 matches the header.
+    pub fn raw_sha1_valid(&self) -> bool {
+        self.computed_raw_sha1 == self.expected_raw_sha1
+    }
+
+    /// Whether the recomputed overall (metadata-inclusive) SHA-1 matches the header.
+    pub fn overall_sha1_valid(&self) -> bool {
+        self.computed_sha1 == self.expected_sha1
+    }
+
+    /// Whether both the raw-data and overall SHA-1 checksums match the header.
+    pub fn is_valid(&self) -> bool {
+        self.raw_sha1_valid() && self.overall_sha1_valid()
+    }
+}
+
+/// Progress of a create/compress operation, passed to the `progress` callback that the create
+/// functions in [`hd`](crate::hd) (and, later, `cd`/`dvd`/`copy`) take. Matches libchdman-rs's
+/// `CompressionProgress` field-for-field.
+///
+/// Available with the `write` feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+#[derive(Debug, Clone, Copy)]
+pub struct CompressionProgress {
+    /// Logical bytes processed so far (`0..=bytes_total`).
+    pub bytes_done: u64,
+    /// Total logical bytes to process.
+    pub bytes_total: u64,
+    /// Running compressed/logical size ratio (`0.0..=1.0+`); `1.0` before any data is processed.
+    pub ratio: f64,
+}
+
+/// Hard-disk CHD creation/extraction (chdman `createraw`/`extractraw`; `createhd`/`extracthd`
+/// geometry helpers). Available with the `write` feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod hd;
+
+/// Re-compress a CHD into a different codec set or hunk size (chdman `copy`). Available with the
+/// `write` feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod copy;
+
+/// DVD CHD creation/extraction (chdman `createdvd`/`extractdvd`). Available with the `write`
+/// feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod dvd;
+
+/// CD-ROM CHD creation + extraction (chdman `createcd`/`extractcd`). Available with the `write`
+/// feature.
+#[cfg(feature = "write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "write")))]
+pub mod cd;
 
 #[cfg(feature = "unstable_lending_iterators")]
 #[cfg_attr(docsrs, doc(cfg(unstable_lending_iterators)))]

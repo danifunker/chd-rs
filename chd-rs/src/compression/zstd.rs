@@ -113,3 +113,63 @@ impl CompressionCodecType for ZstdCodec {
 }
 
 impl CompressionCodec for ZstdCodec {}
+
+/// Zstandard (zstd) compression codec.
+///
+/// Backed by [`libzstd-bitexact-rs`](https://crates.io/crates/libzstd-bitexact-rs) `=0.155`, a
+/// bit-exact pure-Rust port of libzstd **1.5.5** (chdman's version). Reproduces chdman's
+/// per-hunk path exactly: level 22 (`ZSTD_maxCLevel`), **unknown pledged size** (so the frame
+/// keeps `windowLog` 27 and long-distance matching), no dictionary — i.e.
+/// `ZSTD_initCStream(22)` + `ZSTD_compressStream2(.., ZSTD_e_end)`.
+#[cfg(feature = "write-zstd")]
+pub struct ZstdEncoder;
+
+#[cfg(feature = "write-zstd")]
+impl crate::compression::CodecEncodeImplementation for ZstdEncoder {
+    fn new(_: u32) -> crate::Result<Self> {
+        Ok(ZstdEncoder)
+    }
+
+    fn compress(&mut self, input: &[u8], output: &mut [u8]) -> crate::Result<usize> {
+        // `StreamEncoder::new(22)` = unknown pledged size (do NOT pledge the hunk size — that
+        // downsizes windowLog and changes the bytes); `finish` = ZSTD_e_end.
+        let mut out = Vec::new();
+        libzstd_bitexact_rs::StreamEncoder::new(22)
+            .finish(input, &mut out)
+            .map_err(|_| Error::CompressionError)?;
+        if out.len() > output.len() {
+            return Err(Error::CompressionError);
+        }
+        output[..out.len()].copy_from_slice(&out);
+        Ok(out.len())
+    }
+}
+
+#[cfg(feature = "write-zstd")]
+impl crate::compression::CompressionEncoder for ZstdEncoder {}
+
+#[cfg(all(test, feature = "write-zstd"))]
+mod tests {
+    use super::*;
+    use crate::compression::{CodecEncodeImplementation, CodecImplementation};
+
+    /// Round-trip proves the integration is **valid**; byte-exactness vs zstd 1.5.5 is
+    /// guaranteed by libzstd-bitexact-rs's own differential suite. Because zstd decode is
+    /// format-stable, a round-trip cannot catch encoder drift — to guard byte-identity,
+    /// compare *compressed* bytes against a 1.5.5 golden (a chd-rs-side differential test).
+    #[test]
+    fn zstd_encode_roundtrips_through_decoder() {
+        let hunk: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+
+        let mut enc = ZstdEncoder::new(4096).unwrap();
+        let mut comp = vec![0u8; 4096];
+        let n = enc.compress(&hunk, &mut comp).unwrap();
+        assert!(n < hunk.len(), "expected compression to shrink the hunk");
+
+        let mut dec = ZstdCodec::new(4096).unwrap();
+        let mut out = vec![0u8; 4096];
+        let res = dec.decompress(&comp[..n], &mut out).unwrap();
+        assert_eq!(res.total_out(), 4096);
+        assert_eq!(out, hunk);
+    }
+}

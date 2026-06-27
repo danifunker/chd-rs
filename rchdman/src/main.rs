@@ -6,13 +6,40 @@ use chd::metadata::Metadata;
 use chd::Chd;
 use clap::{Parser, Subcommand};
 use num_traits::cast::FromPrimitive;
-use sha1::{Digest, Sha1};
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use thousands::Separable;
+
+/// Parse a chdman-style `-c` compression spec (e.g. `"lzma,zlib"` or `"none"`).
+fn parse_comp(spec: &str) -> anyhow::Result<[u32; 4]> {
+    chd::parse_codec_spec(spec).map_err(|_| anyhow!("invalid compression spec: {spec}"))
+}
+
+/// Refuse to clobber an existing output unless `--force`.
+fn check_overwrite(out: &Path, force: bool) -> anyhow::Result<()> {
+    if !force && out.exists() {
+        return Err(anyhow!(
+            "Output file already exists (use --force to overwrite): {}",
+            out.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Per-hunk progress line for the create/copy commands.
+fn print_progress(p: chd::CompressionProgress) {
+    if p.bytes_total > 0 {
+        print!(
+            "\rCompressing, {:5.1}% complete... (ratio={:.1}%)",
+            100.0 * p.bytes_done as f64 / p.bytes_total as f64,
+            100.0 * p.ratio
+        );
+        let _ = std::io::stdout().flush();
+    }
+}
 
 fn validate_file_exists(s: &OsStr) -> Result<PathBuf, std::io::Error> {
     let path = PathBuf::from(s);
@@ -110,6 +137,122 @@ enum Commands {
         /// parent file name for input CHD
         #[clap(short = 'p', long, parse(try_from_os_str = validate_file_exists))]
         inputparent: Option<PathBuf>,
+    },
+    /// Create a raw CHD from the input file
+    Createraw {
+        #[clap(short, long, parse(try_from_os_str = validate_file_exists))]
+        input: PathBuf,
+        #[clap(short, long)]
+        output: PathBuf,
+        /// parent CHD for the output (creates a compressed child/diff)
+        #[clap(long = "outputparent", short = 'p')]
+        outputparent: Option<PathBuf>,
+        #[clap(long = "hunksize", default_value = "4096")]
+        hunksize: u32,
+        #[clap(long = "unitsize", default_value = "512")]
+        unitsize: u32,
+        #[clap(short = 'c', long, default_value = "zlib")]
+        compression: String,
+        #[clap(short, long)]
+        force: bool,
+    },
+    /// Create a hard-disk CHD from the input file
+    Createhd {
+        #[clap(short, long, parse(try_from_os_str = validate_file_exists))]
+        input: PathBuf,
+        #[clap(short, long)]
+        output: PathBuf,
+        #[clap(long = "hunksize", default_value = "4096")]
+        hunksize: u32,
+        #[clap(long = "unitsize", default_value = "512")]
+        unitsize: u32,
+        #[clap(short = 'c', long, default_value = "lzma,zlib,huff,flac")]
+        compression: String,
+        #[clap(short, long)]
+        force: bool,
+    },
+    /// Create a CD CHD from a CUE / GDI / ISO input
+    Createcd {
+        #[clap(short, long, parse(try_from_os_str = validate_file_exists))]
+        input: PathBuf,
+        #[clap(short, long)]
+        output: PathBuf,
+        #[clap(short = 'c', long, default_value = "cdlz,cdzl,cdfl")]
+        compression: String,
+        #[clap(short, long)]
+        force: bool,
+    },
+    /// Create a DVD CHD from the input ISO
+    Createdvd {
+        #[clap(short, long, parse(try_from_os_str = validate_file_exists))]
+        input: PathBuf,
+        #[clap(short, long)]
+        output: PathBuf,
+        #[clap(short = 'c', long, default_value = "lzma,zlib,huff,flac")]
+        compression: String,
+        #[clap(short, long)]
+        force: bool,
+    },
+    /// Copy a CHD, optionally recompressing / re-hunking
+    Copy {
+        #[clap(short, long, parse(try_from_os_str = validate_file_exists))]
+        input: PathBuf,
+        #[clap(short, long)]
+        output: PathBuf,
+        #[clap(long = "hunksize")]
+        hunksize: Option<u32>,
+        #[clap(short = 'c', long, default_value = "zlib")]
+        compression: String,
+        #[clap(short, long)]
+        force: bool,
+    },
+    /// Add a metadata item to a CHD
+    Addmeta {
+        #[clap(short, long, parse(try_from_os_str = validate_file_exists))]
+        input: PathBuf,
+        #[clap(short, long, parse(try_from_str = try_fourcc_to_u32))]
+        tag: u32,
+        #[clap(short = 'x', long, default_value = "0")]
+        index: u32,
+        /// text value (a trailing NUL is appended, as chdman does)
+        #[clap(long = "valuetext", short = 'v')]
+        valuetext: Option<String>,
+        /// file whose raw contents become the value
+        #[clap(long = "valuefile", short = 'b')]
+        valuefile: Option<PathBuf>,
+        /// do not flag the entry as checksummed
+        #[clap(long = "nochecksum", short = 'n')]
+        nochecksum: bool,
+    },
+    /// Delete a metadata item from a CHD
+    Delmeta {
+        #[clap(short, long, parse(try_from_os_str = validate_file_exists))]
+        input: PathBuf,
+        #[clap(short, long, parse(try_from_str = try_fourcc_to_u32))]
+        tag: u32,
+        #[clap(short = 'x', long, default_value = "0")]
+        index: u32,
+    },
+    /// Extract a CD CHD to a CUE/GDI + binary track file(s)
+    Extractcd {
+        #[clap(short, long, parse(try_from_os_str = validate_file_exists))]
+        input: PathBuf,
+        #[clap(short, long)]
+        output: PathBuf,
+        /// output bin filename (default: the output name with a .bin extension)
+        #[clap(long = "outputbin", short = 'b')]
+        outputbin: Option<PathBuf>,
+        #[clap(short, long)]
+        force: bool,
+    },
+    /// Extract a DVD CHD to an ISO
+    Extractdvd {
+        #[clap(short, long, parse(try_from_os_str = validate_file_exists))]
+        input: PathBuf,
+        #[clap(short, long)]
+        output: PathBuf,
+        #[clap(short, long)]
+        force: bool,
     },
 }
 
@@ -515,39 +658,207 @@ fn verify(input: impl AsRef<Path>, inputparent: Option<impl AsRef<Path>>) -> any
 
     let mut chd = Chd::open(f, p)?;
 
-    let header = chd.header();
-    if !header.is_compressed() {
+    if !chd.header().is_compressed() {
         return Err(anyhow!("No verification to be done; CHD is uncompressed"));
     }
 
-    let raw_sha1 = match header {
-        Header::V3Header(h) => h.sha1,
-        Header::V4Header(h) => h.raw_sha1,
-        Header::V5Header(h) => h.raw_sha1,
-        _ => return Err(anyhow!("No verification to be done; CHD has no checksum")),
-    };
+    // Full verification: raw (data) SHA-1 over the logical bytes + the metadata-inclusive overall.
+    let r = chd.verify()?;
 
-    let mut hasher = Sha1::new();
-    let mut out_buf = chd.get_hunksized_buffer();
-    let mut hunk_iter = chd.hunks();
-    let mut comp_buffer = Vec::new();
-    while let Some(mut hunk) = hunk_iter.next() {
-        hunk.read_hunk_in(&mut comp_buffer, &mut out_buf)?;
-        hasher.update(&out_buf);
-    }
-    let raw_result = hasher.finalize();
-
-    if raw_result[..] == raw_sha1[..] {
+    if r.raw_sha1_valid() {
         println!("Raw SHA1 verification successful!");
     } else {
         eprintln!(
-            "Error: Raw SHA1 in header = {}\n              actual SHA1 = {}\n",
-            hex::encode(raw_sha1),
-            hex::encode(raw_result)
+            "Error: Raw SHA1 in header = {}\n              actual SHA1 = {}",
+            hex::encode(r.expected_raw_sha1),
+            hex::encode(r.computed_raw_sha1)
         );
     }
+    if r.overall_sha1_valid() {
+        println!("Overall SHA1 verification successful!");
+    } else {
+        eprintln!(
+            "Error: Overall SHA1 in header = {}\n                  actual SHA1 = {}",
+            hex::encode(r.expected_sha1),
+            hex::encode(r.computed_sha1)
+        );
+    }
+    Ok(())
+}
 
-    // todo: full verification
+fn createraw(
+    input: &Path,
+    output: &Path,
+    outputparent: Option<&PathBuf>,
+    hunksize: u32,
+    unitsize: u32,
+    compression: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    println!("\nchd-rs - rchdman createraw");
+    check_overwrite(output, force)?;
+    let opts = chd::hd::HdCreateOptions {
+        hunk_size: hunksize,
+        unit_size: unitsize,
+        codecs: parse_comp(compression)?,
+        ..Default::default()
+    };
+    if let Some(parent) = outputparent {
+        chd::hd::create_raw_from_path_with_parent(
+            input,
+            output,
+            parent,
+            opts,
+            &mut print_progress,
+            &|| false,
+        )?;
+    } else {
+        chd::hd::create_raw_from_path(input, output, opts, &mut print_progress, &|| false)?;
+    }
+    println!("\nCompression complete");
+    Ok(())
+}
+
+fn createhd(
+    input: &Path,
+    output: &Path,
+    hunksize: u32,
+    unitsize: u32,
+    compression: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    println!("\nchd-rs - rchdman createhd");
+    check_overwrite(output, force)?;
+    let opts = chd::hd::HdCreateOptions {
+        hunk_size: hunksize,
+        unit_size: unitsize,
+        codecs: parse_comp(compression)?,
+        ..Default::default()
+    };
+    chd::hd::create_from_path(input, output, opts, &mut print_progress, &|| false)?;
+    println!("\nCompression complete");
+    Ok(())
+}
+
+fn createcd(input: &Path, output: &Path, compression: &str, force: bool) -> anyhow::Result<()> {
+    println!("\nchd-rs - rchdman createcd");
+    check_overwrite(output, force)?;
+    let opts = chd::cd::CdCreateOptions {
+        codecs: parse_comp(compression)?,
+        ..Default::default()
+    };
+    let ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "cue" => chd::cd::create_from_cue(input, output, opts, &mut print_progress, &|| false)?,
+        "gdi" => chd::cd::create_from_gdi(input, output, opts, &mut print_progress, &|| false)?,
+        _ => chd::cd::create_from_iso(input, output, opts, &mut print_progress, &|| false)?,
+    }
+    println!("\nCompression complete");
+    Ok(())
+}
+
+fn createdvd(input: &Path, output: &Path, compression: &str, force: bool) -> anyhow::Result<()> {
+    println!("\nchd-rs - rchdman createdvd");
+    check_overwrite(output, force)?;
+    let opts = chd::dvd::DvdCreateOptions {
+        codecs: parse_comp(compression)?,
+        ..Default::default()
+    };
+    chd::dvd::create_from_iso(input, output, opts, &mut print_progress, &|| false)?;
+    println!("\nCompression complete");
+    Ok(())
+}
+
+fn copy(
+    input: &Path,
+    output: &Path,
+    hunksize: Option<u32>,
+    compression: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    println!("\nchd-rs - rchdman copy");
+    check_overwrite(output, force)?;
+    let opts = chd::copy::CopyOptions {
+        hunk_size: hunksize,
+        codecs: parse_comp(compression)?,
+    };
+    chd::copy::copy(input, output, opts, &mut print_progress, &|| false)?;
+    println!("\nCompression complete");
+    Ok(())
+}
+
+fn addmeta(
+    input: &Path,
+    tag: u32,
+    index: u32,
+    valuetext: Option<&String>,
+    valuefile: Option<&PathBuf>,
+    nochecksum: bool,
+) -> anyhow::Result<()> {
+    println!("\nchd-rs - rchdman addmeta");
+    let data = if let Some(text) = valuetext {
+        let mut b = text.clone().into_bytes();
+        b.push(0); // chdman stores the C string's NUL terminator
+        b
+    } else if let Some(file) = valuefile {
+        std::fs::read(file)?
+    } else {
+        return Err(anyhow!("either --valuetext or --valuefile is required"));
+    };
+    let flags = if nochecksum {
+        0
+    } else {
+        chd::metadata::METADATA_FLAG_CHECKSUM
+    };
+    let mut file = OpenOptions::new().read(true).write(true).open(input)?;
+    chd::metadata::write_metadata(&mut file, tag, index, &data, flags)?;
+    println!("Metadata added");
+    Ok(())
+}
+
+fn delmeta(input: &Path, tag: u32, index: u32) -> anyhow::Result<()> {
+    println!("\nchd-rs - rchdman delmeta");
+    let mut file = OpenOptions::new().read(true).write(true).open(input)?;
+    chd::metadata::delete_metadata(&mut file, tag, index)?;
+    println!("Metadata deleted");
+    Ok(())
+}
+
+fn extractcd(
+    input: &Path,
+    output: &Path,
+    outputbin: Option<&PathBuf>,
+    force: bool,
+) -> anyhow::Result<()> {
+    println!("\nchd-rs - rchdman extractcd");
+    check_overwrite(output, force)?;
+    let is_gdi = output
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gdi"))
+        .unwrap_or(false);
+    if is_gdi {
+        chd::cd::extract_to_gdi(input, output, &mut |_| {})?;
+    } else {
+        let bin = outputbin
+            .cloned()
+            .unwrap_or_else(|| output.with_extension("bin"));
+        check_overwrite(&bin, force)?;
+        chd::cd::extract_to_cue(input, output, &bin, &mut |_| {})?;
+    }
+    println!("Extraction complete");
+    Ok(())
+}
+
+fn extractdvd(input: &Path, output: &Path, force: bool) -> anyhow::Result<()> {
+    println!("\nchd-rs - rchdman extractdvd");
+    check_overwrite(output, force)?;
+    chd::dvd::extract_to_iso(input, output, &mut |_| {})?;
+    println!("Extraction complete");
     Ok(())
 }
 
@@ -645,6 +956,77 @@ fn main() -> anyhow::Result<()> {
             force,
             output,
         } => extractraw(input, inputparent.as_deref(), output, *force)?,
+        Commands::Createraw {
+            input,
+            output,
+            outputparent,
+            hunksize,
+            unitsize,
+            compression,
+            force,
+        } => createraw(
+            input,
+            output,
+            outputparent.as_ref(),
+            *hunksize,
+            *unitsize,
+            compression,
+            *force,
+        )?,
+        Commands::Createhd {
+            input,
+            output,
+            hunksize,
+            unitsize,
+            compression,
+            force,
+        } => createhd(input, output, *hunksize, *unitsize, compression, *force)?,
+        Commands::Createcd {
+            input,
+            output,
+            compression,
+            force,
+        } => createcd(input, output, compression, *force)?,
+        Commands::Createdvd {
+            input,
+            output,
+            compression,
+            force,
+        } => createdvd(input, output, compression, *force)?,
+        Commands::Copy {
+            input,
+            output,
+            hunksize,
+            compression,
+            force,
+        } => copy(input, output, *hunksize, compression, *force)?,
+        Commands::Addmeta {
+            input,
+            tag,
+            index,
+            valuetext,
+            valuefile,
+            nochecksum,
+        } => addmeta(
+            input,
+            *tag,
+            *index,
+            valuetext.as_ref(),
+            valuefile.as_ref(),
+            *nochecksum,
+        )?,
+        Commands::Delmeta { input, tag, index } => delmeta(input, *tag, *index)?,
+        Commands::Extractcd {
+            input,
+            output,
+            outputbin,
+            force,
+        } => extractcd(input, output, outputbin.as_ref(), *force)?,
+        Commands::Extractdvd {
+            input,
+            output,
+            force,
+        } => extractdvd(input, output, *force)?,
     }
     Ok(())
 }
