@@ -13,7 +13,7 @@
 //!
 //! ## Coming from libchdman-rs?
 //! chd-rs keeps its generic borrowed [`Chd<F>`](crate::Chd) reader and exposes creation as free
-//! functions (not methods on an owned, writeable handle). See `docs/libchdman-differences.md`.
+//! functions (not methods on an owned, writeable handle).
 
 use crate::error::{Error, Result};
 use crate::metadata::Metadata;

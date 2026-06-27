@@ -203,9 +203,7 @@ hd::create_from_path(in_path, out_path, HdCreateOptions::default(), &mut |_p| {}
 The owned-handle runtime read/write surface maps to `hd::HdImage` (`open` / `open_with_diff` /
 `read_sector` / `write_sector`); `CompressionProgress` matches libchdman-rs field-for-field.
 
-For the exhaustive "translate my libchdman-rs code" guide (every accessor and diverging item) see
-[docs/libchdman-differences.md](docs/libchdman-differences.md), and the chdman-command mapping in
-[docs/chdman-mapping.md](docs/chdman-mapping.md).
+For the full chdman-command mapping see [docs/chdman-mapping.md](docs/chdman-mapping.md).
 
 ## `rchdman` command line tool
 chd-rs ships `rchdman`, a chdman-style CLI covering read **and** create operations:
