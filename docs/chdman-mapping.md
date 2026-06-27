@@ -31,10 +31,15 @@ callbacks (extract takes `&mut dyn FnMut(u64)`); they need the `write` feature.
 `none`, `zlib`, `zstd`, `lzma`, `huff`, `flac`, `cdzl`, `cdzs`, `cdlz`, `cdfl`, `avhu`. `zstd`/`cdzs`
 need the `write-zstd` feature.
 
-⚠️ **FLAC byte-identity is libm-gated.** `flac`/`cdfl` (and the HD/DVD default sets that include
-`flac`) are byte-identical to a **glibc**-built chdman; against an MSVC/Windows chdman they are
-round-trip-correct but may differ by a few bytes. `cdlz`/`cdzl`/`cdzs`/`zlib`/`lzma`/`zstd`/`huff`
-are byte-identical on every platform.
+ℹ️ **Note — FLAC output is platform-dependent (as it is for `chdman` itself).** FLAC encoding does
+some floating-point math, and its result depends on the platform's C math library (`libm` — glibc on
+Linux, the MSVC runtime on Windows). Any two FLAC encoders therefore match byte-for-byte only when
+run against the same `libm`; this is inherent to FLAC, not a property of chd-rs — two `chdman` builds
+differ from each other the same way. chd-rs's `flac`/`cdfl` output (and the HD/DVD default sets that
+include `flac`) matches a **glibc**-built `chdman` byte-for-byte, and may differ by a few bytes from
+an MSVC/Windows `chdman` build; either way it is a valid CHD that decodes to identical audio. The
+integer codecs (`cdlz`/`cdzl`/`cdzs`/`zlib`/`lzma`/`zstd`/`huff`) are byte-identical on every
+platform.
 
 ## Runtime block device
 
