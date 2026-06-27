@@ -442,6 +442,15 @@ fn file_size(path: &Path) -> Result<u64> {
     Ok(std::fs::metadata(path)?.len())
 }
 
+/// Byte-pair-swap `buf` in place — the Red Book audio / `MOTOROLA` endianness flip applied to CD
+/// audio sectors on the way into and out of a CHD. A trailing odd byte (there isn't one for 2352/
+/// 2048-byte sectors) is left untouched, matching chdman's `for (i = 0; i + 1 < n; i += 2)`.
+fn swap_audio_pairs(buf: &mut [u8]) {
+    for pair in buf.chunks_exact_mut(2) {
+        pair.swap(0, 1);
+    }
+}
+
 /// Assemble the logical frame image from the parsed TOC — a port of `chd_cd_compressor::read_data`
 /// (`chdman.cpp:437`). Each track occupies `(frames + extraframes) * 2448` bytes; for every one of
 /// its `frames` data frames, the source's `datasize + subsize` bytes are read contiguously from
@@ -476,12 +485,7 @@ fn assemble_logical(tracks: &mut [CdTrack]) -> Result<Vec<u8>> {
                 let dst = (dest_frame as usize + fr) * frame_size;
                 logical[dst..dst + bpf].copy_from_slice(&block[fr * bpf..(fr + 1) * bpf]);
                 if t.swap {
-                    let sector = &mut logical[dst..dst + sector_data];
-                    let mut k = 0;
-                    while k + 1 < sector_data {
-                        sector.swap(k, k + 1);
-                        k += 2;
-                    }
+                    swap_audio_pairs(&mut logical[dst..dst + sector_data]);
                 }
             }
         }
@@ -598,6 +602,7 @@ fn build_cd<W: Write + Seek>(
         CD_FRAME_SIZE,
         &codecs,
         &entries,
+        None,
         progress,
         cancel,
     )
@@ -961,11 +966,7 @@ pub fn extract_to_cue(
             for _ in 0..t.frames {
                 reader.read_exact(&mut frame).map_err(Error::from)?;
                 if t.trktype == TrackType::Audio {
-                    let mut k = 0;
-                    while k + 1 < ds {
-                        frame.swap(k, k + 1);
-                        k += 2;
-                    }
+                    swap_audio_pairs(&mut frame[..ds]);
                 }
                 bin.write_all(&frame[..ds]).map_err(Error::from)?;
                 written += ds as u64;
@@ -1137,23 +1138,13 @@ pub fn extract_to_iso(
 ) -> Result<()> {
     let f = BufReader::new(File::open(chd_path).map_err(Error::from)?);
     let chd = Chd::open(f, None)?;
-    let mut reader = CdCookedReader::open(chd)?;
+    let reader = CdCookedReader::open(chd)?;
+    let total = reader.len();
 
     let res = (|| -> Result<()> {
         let mut out = BufWriter::new(File::create(iso_path).map_err(Error::from)?);
-        let mut buf = vec![0u8; COOKED_SECTOR * 16];
-        let mut written = 0u64;
-        loop {
-            let n = reader.read(&mut buf).map_err(Error::from)?;
-            if n == 0 {
-                break;
-            }
-            out.write_all(&buf[..n]).map_err(Error::from)?;
-            written += n as u64;
-            progress(written);
-        }
-        out.flush().map_err(Error::from)?;
-        Ok(())
+        write::drain(reader, total, COOKED_SECTOR * 16, &mut out, progress)?;
+        out.flush().map_err(Error::from)
     })();
 
     if res.is_err() {
@@ -1251,11 +1242,7 @@ fn extract_gdi_inner<F: Read + Seek>(
         for _ in 0..actual {
             reader.read_exact(&mut frame).map_err(Error::from)?;
             if is_audio {
-                let mut k = 0;
-                while k + 1 < ds {
-                    frame.swap(k, k + 1);
-                    k += 2;
-                }
+                swap_audio_pairs(&mut frame[..ds]);
             }
             tf.write_all(&frame[..ds]).map_err(Error::from)?;
             total += ds as u64;

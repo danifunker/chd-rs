@@ -8,12 +8,10 @@
 //! Matches libchdman-rs's `dvd` module.
 
 use crate::error::{Error, Result};
-use crate::metadata::Metadata;
 use crate::read::ChdReader;
 use crate::{
     write, Chd, CompressionProgress, CHD_CODEC_FLAC, CHD_CODEC_HUFF, CHD_CODEC_LZMA, CHD_CODEC_ZLIB,
 };
-use std::convert::TryInto;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -87,6 +85,7 @@ pub fn create_from_reader<R: Read, W: Write + std::io::Seek>(
         DVD_SECTOR_SIZE,
         &codecs,
         &entries,
+        None,
         progress,
         cancel,
     )
@@ -115,11 +114,12 @@ pub fn create_from_iso(
     res
 }
 
-/// Returns whether the CHD at `chd_path` carries the `DVD ` metadata record.
+/// Returns whether the CHD at `chd_path` carries the `DVD ` metadata record. Scans the metadata
+/// linked list by tag only (the iterator reads each 16-byte header, never the payloads).
 fn is_dvd<F: Read + std::io::Seek>(chd: &mut Chd<F>) -> Result<bool> {
+    use crate::metadata::MetadataTag;
     let dvd_tag = crate::make_tag(b"DVD ");
-    let metas: Vec<Metadata> = chd.metadata_refs().try_into()?;
-    Ok(metas.iter().any(|m| m.metatag == dvd_tag))
+    Ok(chd.metadata_refs().any(|m| m.metatag() == dvd_tag))
 }
 
 /// Stream a DVD CHD's logical bytes to `writer` (chdman `extractdvd`). Rejects CHDs without the
@@ -127,7 +127,7 @@ fn is_dvd<F: Read + std::io::Seek>(chd: &mut Chd<F>) -> Result<bool> {
 /// HD/raw CHDs).
 pub fn extract_to_writer<W: Write>(
     chd_path: &Path,
-    mut writer: W,
+    writer: W,
     progress: &mut dyn FnMut(u64),
 ) -> Result<()> {
     let f = BufReader::new(File::open(chd_path).map_err(Error::from)?);
@@ -137,20 +137,7 @@ pub fn extract_to_writer<W: Write>(
     }
     let logical = chd.header().logical_bytes();
     let hunk_size = chd.header().hunk_size() as usize;
-
-    let mut reader = ChdReader::new(chd);
-    let mut buf = vec![0u8; hunk_size.max(1)];
-    let mut remaining = logical;
-    let mut done = 0u64;
-    while remaining > 0 {
-        let want = remaining.min(hunk_size as u64) as usize;
-        reader.read_exact(&mut buf[..want]).map_err(Error::from)?;
-        writer.write_all(&buf[..want]).map_err(Error::from)?;
-        remaining -= want as u64;
-        done += want as u64;
-        progress(done);
-    }
-    Ok(())
+    write::drain(ChdReader::new(chd), logical, hunk_size, writer, progress)
 }
 
 /// File-output convenience over [`extract_to_writer`].

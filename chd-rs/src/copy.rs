@@ -87,6 +87,6 @@ fn copy_inner(
 
     let mut out = File::create(dest).map_err(Error::from)?;
     write::write_create(
-        &mut out, &data, hunk, unit, &codecs, &entries, progress, cancel,
+        &mut out, &data, hunk, unit, &codecs, &entries, None, progress, cancel,
     )
 }

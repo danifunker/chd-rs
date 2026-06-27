@@ -9,7 +9,6 @@ use crate::error::{Error, Result};
 use crate::header::CodecType;
 use crate::huffman_encode::{BitWriter, HuffEncoder};
 use crate::CompressionProgress;
-use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
 
@@ -19,7 +18,8 @@ const V5_HEADER_SIZE: u32 = 124;
 /// Size of an on-disk metadata entry header: `tag(4) + flags(1) + length(3) + next(8)`.
 const METADATA_HEADER_SIZE: u64 = 16;
 /// Metadata flag: this entry's payload is included in the overall SHA-1 (`CHD_MDFLAGS_CHECKSUM`).
-pub(crate) const CHD_MDFLAGS_CHECKSUM: u8 = 0x01;
+/// Re-exported from [`crate::metadata`] so the create modules have one canonical name.
+pub(crate) const CHD_MDFLAGS_CHECKSUM: u8 = crate::metadata::METADATA_FLAG_CHECKSUM;
 
 /// A metadata record to write into a freshly-created CHD. `flags` is usually
 /// [`CHD_MDFLAGS_CHECKSUM`] (chdman's `write_metadata` default).
@@ -62,29 +62,37 @@ fn build_metadata_blob(entries: &[MetaEntry], meta_start: u64) -> Vec<u8> {
     blob
 }
 
-/// Port of `chd_file::compute_overall_sha1` (`chd.cpp:1709`): the overall SHA-1 is
-/// `SHA1(raw_sha1 ‖ sorted[ tag(4 BE) ‖ SHA1(payload) ])`, over only the metadata entries with the
-/// `CHECKSUM` flag, sorted by the 24-byte `(tag, sha1)` tuple (a `memcmp`, i.e. lexicographic).
-/// With no checksummed metadata this is just `SHA1(raw_sha1)`.
-fn compute_overall_sha1(raw_sha1: &[u8; 20], entries: &[MetaEntry]) -> [u8; 20] {
-    let mut hashes: Vec<[u8; 24]> = Vec::new();
-    for e in entries {
-        if e.flags & CHD_MDFLAGS_CHECKSUM == 0 {
-            continue;
-        }
-        let mut h = [0u8; 24];
-        h[0..4].copy_from_slice(&e.tag.to_be_bytes());
-        h[4..24].copy_from_slice(&sha1_digest(e.payload));
-        hashes.push(h);
+/// Build the 124-byte V5 header. `compression` is the codec FourCC list (a short/empty list leaves
+/// the trailing slots zero, i.e. uncompressed); pass zeroed SHA-1 arrays for fields a given writer
+/// leaves blank (uncompressed CHDs leave `raw_sha1`/`sha1` zero; a non-parent CHD leaves
+/// `parent_sha1` zero). Centralizing the byte offsets here keeps the three writers from drifting.
+fn build_v5_header(
+    compression: &[CodecType],
+    logical_bytes: u64,
+    map_offset: u64,
+    meta_offset: u64,
+    hunk_bytes: u32,
+    unit_bytes: u32,
+    raw_sha1: &[u8; 20],
+    sha1: &[u8; 20],
+    parent_sha1: &[u8; 20],
+) -> [u8; V5_HEADER_SIZE as usize] {
+    let mut hdr = [0u8; V5_HEADER_SIZE as usize];
+    hdr[0..8].copy_from_slice(CHD_MAGIC);
+    hdr[8..12].copy_from_slice(&V5_HEADER_SIZE.to_be_bytes());
+    hdr[12..16].copy_from_slice(&5u32.to_be_bytes());
+    for (slot, &c) in compression.iter().enumerate() {
+        hdr[16 + slot * 4..16 + slot * 4 + 4].copy_from_slice(&(c as u32).to_be_bytes());
     }
-    hashes.sort_unstable(); // [u8; 24] Ord == memcmp == chdman's metadata_hash_compare
-
-    let mut hasher = Sha1::new();
-    hasher.update(raw_sha1);
-    for h in &hashes {
-        hasher.update(h);
-    }
-    hasher.finalize().into()
+    hdr[32..40].copy_from_slice(&logical_bytes.to_be_bytes());
+    hdr[40..48].copy_from_slice(&map_offset.to_be_bytes());
+    hdr[48..56].copy_from_slice(&meta_offset.to_be_bytes());
+    hdr[56..60].copy_from_slice(&hunk_bytes.to_be_bytes());
+    hdr[60..64].copy_from_slice(&unit_bytes.to_be_bytes());
+    hdr[64..84].copy_from_slice(raw_sha1);
+    hdr[84..104].copy_from_slice(sha1);
+    hdr[104..124].copy_from_slice(parent_sha1);
+    hdr
 }
 
 // V5 map compression-type codes (== MAME's COMPRESSION_* and chd-rs's CompressionTypeV5).
@@ -163,12 +171,7 @@ fn bits_for_value(mut value: u64) -> u8 {
     result
 }
 
-#[inline]
-fn sha1_digest(data: &[u8]) -> [u8; 20] {
-    let mut h = Sha1::new();
-    h.update(data);
-    h.finalize().into()
-}
+use crate::metadata::sha1_bytes;
 
 /// Precomputed parent-hunk hashes for parent dedup when writing a child CHD. Keyed by the
 /// `(crc16, sha1)` of a `hunk_bytes`-sized window at each unit-aligned offset in the parent's
@@ -202,7 +205,7 @@ pub(crate) fn build_parent_ref(
             let start = pos as usize * ub;
             let window = &padded_img[start..start + hb];
             let crc = crate::block_hash::CRC16.checksum(window);
-            let key = (crc, sha1_digest(window));
+            let key = (crc, sha1_bytes(window));
             map.entry(key).or_insert(pos);
         }
     }
@@ -223,6 +226,7 @@ pub(crate) fn build_parent_ref(
 /// codec must have an encoder (`init_encoder`).
 ///
 /// This is the single-codec convenience over [`write_raw`]; it is exactly `write_raw(.., &[codec])`.
+#[cfg(test)]
 pub fn write_raw_compressed<W: Write + Seek>(
     out: &mut W,
     data: &[u8],
@@ -246,6 +250,7 @@ pub fn write_raw_compressed<W: Write + Seek>(
 ///
 /// `codecs` must be non-empty and at most 4 entries. For the uncompressed (no-codec) format use
 /// [`write_raw_uncompressed`]. Every codec must have an encoder (`init_encoder`).
+#[cfg(test)]
 pub fn write_raw<W: Write + Seek>(
     out: &mut W,
     data: &[u8],
@@ -266,13 +271,13 @@ pub fn write_raw<W: Write + Seek>(
     )
 }
 
-/// Core of [`write_raw`] with metadata + progress/cancel hooks (used by the public `hd` create
-/// surface, including `createhd`).
+/// Core compressed-write routine behind [`write_create`], with metadata + progress/cancel hooks
+/// (used by the public `hd`/`cd`/`dvd`/`copy` create surface, including `createhd`).
 ///
 /// `metadata` (possibly empty) is written **between the header and the compressed hunks** (so the
 /// header's `meta_offset` is `V5_HEADER_SIZE` and the hunks start after the metadata blob), exactly
 /// as chdman lays out a compressed `createhd`. The overall SHA-1 then includes the checksummed
-/// metadata ([`compute_overall_sha1`]).
+/// metadata ([`crate::metadata::overall_sha1`]).
 ///
 /// `progress(bytes_done, bytes_total, compressed_bytes_so_far)` is invoked once per hunk (before
 /// processing it) and once more at the end; `cancel()` is polled before each hunk and, if it
@@ -342,7 +347,7 @@ pub(crate) fn write_raw_inner<W: Write + Seek>(
         }
 
         let crc = crate::block_hash::CRC16.checksum(&hunk_buf);
-        let sha1 = sha1_digest(&hunk_buf);
+        let sha1 = sha1_bytes(&hunk_buf);
         let base = i as usize * 12;
 
         // SELF: identical to an earlier written hunk -> reference it, store nothing.
@@ -404,28 +409,25 @@ pub(crate) fn write_raw_inner<W: Write + Seek>(
     let map_offset = data_start + data_stream.len() as u64;
     let stored_map = compress_v5_map(&rawmap, hunk_count as u32, hunk_bytes, unit_bytes);
 
-    let raw_sha1 = sha1_digest(data);
-    let overall_sha1 = compute_overall_sha1(&raw_sha1, metadata);
+    let raw_sha1 = sha1_bytes(data);
+    let overall_sha1 = crate::metadata::overall_sha1(
+        &raw_sha1,
+        metadata.iter().map(|e| (e.tag, e.flags, e.payload)),
+    );
 
     // --- header ---
-    let mut hdr = [0u8; V5_HEADER_SIZE as usize];
-    hdr[0..8].copy_from_slice(CHD_MAGIC);
-    hdr[8..12].copy_from_slice(&V5_HEADER_SIZE.to_be_bytes());
-    hdr[12..16].copy_from_slice(&5u32.to_be_bytes());
-    // compression[0..4]: one u32 FourCC per slot, in order; unused slots stay zero.
-    for (slot, &c) in codecs.iter().enumerate() {
-        hdr[16 + slot * 4..16 + slot * 4 + 4].copy_from_slice(&(c as u32).to_be_bytes());
-    }
-    hdr[32..40].copy_from_slice(&logical_bytes.to_be_bytes());
-    hdr[40..48].copy_from_slice(&map_offset.to_be_bytes());
-    hdr[48..56].copy_from_slice(&meta_offset.to_be_bytes());
-    hdr[56..60].copy_from_slice(&hunk_bytes.to_be_bytes());
-    hdr[60..64].copy_from_slice(&unit_bytes.to_be_bytes());
-    hdr[64..84].copy_from_slice(&raw_sha1);
-    hdr[84..104].copy_from_slice(&overall_sha1);
-    if let Some(p) = parent {
-        hdr[104..124].copy_from_slice(&p.sha1);
-    }
+    let parent_sha1 = parent.map(|p| p.sha1).unwrap_or([0u8; 20]);
+    let hdr = build_v5_header(
+        codecs,
+        logical_bytes,
+        map_offset,
+        meta_offset,
+        hunk_bytes,
+        unit_bytes,
+        &raw_sha1,
+        &overall_sha1,
+        &parent_sha1,
+    );
 
     out.write_all(&hdr)?;
     out.write_all(&meta_blob)?;
@@ -616,6 +618,7 @@ pub(crate) fn compress_v5_map(
 /// (each entry = the hunk's file offset divided by `hunk_bytes`), zero-padding up to the next
 /// `hunk_bytes` boundary, then the raw hunks (the final hunk zero-padded to `hunk_bytes`).
 /// chdman leaves the SHA-1 fields zero for uncompressed CHDs and does not verify them.
+#[cfg(test)]
 pub fn write_raw_uncompressed<W: Write + Seek>(
     out: &mut W,
     data: &[u8],
@@ -625,7 +628,8 @@ pub fn write_raw_uncompressed<W: Write + Seek>(
     write_uncompressed_inner(out, data, hunk_bytes, unit_bytes, &[])
 }
 
-/// Core of [`write_raw_uncompressed`] with metadata support (used by `createhd -c none`).
+/// Core uncompressed-write routine behind [`write_create`] with metadata support (used by
+/// `createhd -c none`).
 ///
 /// `metadata` (possibly empty) is written **after the map and before the data** (so the header's
 /// `meta_offset` is `V5_HEADER_SIZE + map_size`, and `data_start` rounds up past the metadata to
@@ -654,18 +658,18 @@ pub(crate) fn write_uncompressed_inner<W: Write + Seek>(
     let meta_offset = if meta_blob.is_empty() { 0 } else { meta_start };
     let data_start = round_up(meta_start + meta_blob.len() as u64, hunk_bytes_u64);
 
-    // --- header (124 bytes, big-endian) ---
-    let mut hdr = [0u8; V5_HEADER_SIZE as usize];
-    hdr[0..8].copy_from_slice(CHD_MAGIC);
-    hdr[8..12].copy_from_slice(&V5_HEADER_SIZE.to_be_bytes());
-    hdr[12..16].copy_from_slice(&5u32.to_be_bytes());
-    // compression[4] = 0 (none) — already zero
-    hdr[32..40].copy_from_slice(&logical_bytes.to_be_bytes());
-    hdr[40..48].copy_from_slice(&map_offset.to_be_bytes());
-    hdr[48..56].copy_from_slice(&meta_offset.to_be_bytes());
-    hdr[56..60].copy_from_slice(&hunk_bytes.to_be_bytes());
-    hdr[60..64].copy_from_slice(&unit_bytes.to_be_bytes());
-    // raw_sha1 (64), sha1 (84), parent_sha1 (104) = 0 for uncompressed CHDs
+    // --- header (124 bytes) — uncompressed: no codecs, SHA-1 fields zero (as chdman leaves them) ---
+    let hdr = build_v5_header(
+        &[],
+        logical_bytes,
+        map_offset,
+        meta_offset,
+        hunk_bytes,
+        unit_bytes,
+        &[0u8; 20],
+        &[0u8; 20],
+        &[0u8; 20],
+    );
     out.write_all(&hdr)?;
 
     // --- map: each entry = (data_start + i*hunk_bytes) / hunk_bytes ---
@@ -722,18 +726,18 @@ pub(crate) fn write_empty_diff<W: Write + Seek>(
     let meta_offset = if meta_blob.is_empty() { 0 } else { meta_start };
     let data_start = round_up(meta_start + meta_blob.len() as u64, hunk_bytes_u64);
 
-    let mut hdr = [0u8; V5_HEADER_SIZE as usize];
-    hdr[0..8].copy_from_slice(CHD_MAGIC);
-    hdr[8..12].copy_from_slice(&V5_HEADER_SIZE.to_be_bytes());
-    hdr[12..16].copy_from_slice(&5u32.to_be_bytes());
-    // compression[0..4] = 0 (none) — already zero
-    hdr[32..40].copy_from_slice(&logical_bytes.to_be_bytes());
-    hdr[40..48].copy_from_slice(&map_offset.to_be_bytes());
-    hdr[48..56].copy_from_slice(&meta_offset.to_be_bytes());
-    hdr[56..60].copy_from_slice(&hunk_bytes.to_be_bytes());
-    hdr[60..64].copy_from_slice(&unit_bytes.to_be_bytes());
-    // raw_sha1 (64) + sha1 (84) stay zero (uncompressed); parent_sha1 (104) links the parent.
-    hdr[104..124].copy_from_slice(parent_sha1);
+    // uncompressed (none) + zero raw/overall SHA-1; parent_sha1 links the parent.
+    let hdr = build_v5_header(
+        &[],
+        logical_bytes,
+        map_offset,
+        meta_offset,
+        hunk_bytes,
+        unit_bytes,
+        &[0u8; 20],
+        &[0u8; 20],
+        parent_sha1,
+    );
     out.write_all(&hdr)?;
 
     // all-zero map: every hunk falls through to the parent until written.
@@ -773,10 +777,34 @@ pub(crate) fn read_and_pad<R: Read>(
     Ok(data)
 }
 
-/// Create dispatch for the `hd`/`dvd`/`copy` modules: write `data` (already padded to the logical
-/// size) with the given codec list + metadata, choosing the uncompressed or compressed writer and
-/// adapting the numeric per-hunk callback to a [`CompressionProgress`]. An empty `codecs` writes an
-/// uncompressed CHD (no per-hunk progress hook; `cancel` checked once up front).
+/// Stream `total` bytes from `reader` to `writer` in `chunk`-sized reads, reporting the cumulative
+/// byte count via `progress`. Shared by the `extract_*` paths (hd/dvd over [`ChdReader`](crate::read),
+/// cd over its cooked reader) so the drain loop lives in one place.
+pub(crate) fn drain<R: Read, W: Write>(
+    mut reader: R,
+    total: u64,
+    chunk: usize,
+    mut writer: W,
+    progress: &mut dyn FnMut(u64),
+) -> Result<()> {
+    let mut buf = vec![0u8; chunk.max(1)];
+    let mut done = 0u64;
+    while done < total {
+        let want = (total - done).min(chunk as u64) as usize;
+        reader.read_exact(&mut buf[..want])?;
+        writer.write_all(&buf[..want])?;
+        done += want as u64;
+        progress(done);
+    }
+    Ok(())
+}
+
+/// Create dispatch for the `hd`/`cd`/`dvd`/`copy` modules: write `data` (already padded to the
+/// logical size) with the given codec list + metadata, choosing the uncompressed or compressed
+/// writer and adapting the numeric per-hunk callback to a [`CompressionProgress`]. An empty `codecs`
+/// writes an uncompressed CHD (no per-hunk progress hook; `cancel` checked once up front). `parent`
+/// (a compressed child of a parent CHD) requires a codec list — an uncompressed runtime diff goes
+/// through [`crate::hd::HdImage`] instead.
 pub(crate) fn write_create<W: Write + Seek>(
     out: &mut W,
     data: &[u8],
@@ -784,11 +812,15 @@ pub(crate) fn write_create<W: Write + Seek>(
     unit_size: u32,
     codecs: &[CodecType],
     metadata: &[MetaEntry],
+    parent: Option<&ParentRef>,
     progress: &mut dyn FnMut(CompressionProgress),
     cancel: &dyn Fn() -> bool,
 ) -> Result<()> {
     let logical = data.len() as u64;
     if codecs.is_empty() {
+        if parent.is_some() {
+            return Err(Error::InvalidParameter);
+        }
         if cancel() {
             return Err(Error::Cancelled);
         }
@@ -813,6 +845,6 @@ pub(crate) fn write_create<W: Write + Seek>(
         });
     };
     write_raw_inner(
-        out, data, hunk_size, unit_size, codecs, metadata, None, &mut prog, cancel,
+        out, data, hunk_size, unit_size, codecs, metadata, parent, &mut prog, cancel,
     )
 }

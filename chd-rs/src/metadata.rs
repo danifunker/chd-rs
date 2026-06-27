@@ -230,8 +230,51 @@ impl<'a, F: Read + Seek + 'a> Iterator for MetadataRefs<'a, F> {
 
 /// Metadata flag: this entry's payload is included in the overall SHA-1 (MAME's
 /// `CHD_MDFLAGS_CHECKSUM`). chdman writes this on every metadata record by default.
-#[cfg(feature = "write")]
+#[cfg(feature = "verify")]
 pub const METADATA_FLAG_CHECKSUM: u8 = 0x01;
+
+/// SHA-1 of `data` (the RustCrypto digest) — the single integrity-hash primitive shared by the
+/// write, edit, and verify paths.
+#[cfg(feature = "verify")]
+pub(crate) fn sha1_bytes(data: &[u8]) -> [u8; 20] {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(data);
+    h.finalize().into()
+}
+
+/// Port of `chd_file::compute_overall_sha1` (`chd.cpp:1709`): the metadata-inclusive overall SHA-1,
+/// `SHA1(raw_sha1 ‖ sorted[ tag(4 BE) ‖ SHA1(payload) ])` over the `CHECKSUM`-flagged entries,
+/// sorted by the 24-byte `(tag, sha1)` tuple (a `memcmp`). `entries` yields `(tag, flags, payload)`
+/// in any order; non-checksummed entries are skipped. With none, the result is just
+/// `SHA1(raw_sha1)`.
+///
+/// The one definition shared by the new-file writer ([`crate::write`]), the in-place editor
+/// ([`edit`]), and [`Chd::verify`](crate::Chd::verify) — the parity contract lives in one place.
+#[cfg(feature = "verify")]
+pub(crate) fn overall_sha1<'a>(
+    raw_sha1: &[u8; 20],
+    entries: impl IntoIterator<Item = (u32, u8, &'a [u8])>,
+) -> [u8; 20] {
+    use sha1::{Digest, Sha1};
+    let mut hashes: Vec<[u8; 24]> = Vec::new();
+    for (tag, flags, payload) in entries {
+        if flags & METADATA_FLAG_CHECKSUM == 0 {
+            continue;
+        }
+        let mut h = [0u8; 24];
+        h[0..4].copy_from_slice(&tag.to_be_bytes());
+        h[4..24].copy_from_slice(&sha1_bytes(payload));
+        hashes.push(h);
+    }
+    hashes.sort_unstable(); // [u8; 24] Ord == memcmp == chdman's metadata_hash_compare
+    let mut hasher = Sha1::new();
+    hasher.update(raw_sha1);
+    for h in &hashes {
+        hasher.update(h);
+    }
+    hasher.finalize().into()
+}
 
 // In-place metadata writer for existing V5 CHDs (chdman `addmeta`/`delmeta`). These mutate the
 // file's metadata linked list, so they take a `Read + Write + Seek` handle (e.g. a `File` opened
@@ -240,7 +283,6 @@ pub const METADATA_FLAG_CHECKSUM: u8 = 0x01;
 #[cfg(feature = "write")]
 mod edit {
     use super::{Error, Result, METADATA_HEADER_SIZE};
-    use sha1::{Digest, Sha1};
     use std::io::{Read, Seek, SeekFrom, Write};
 
     // V5 header field offsets.
@@ -249,7 +291,6 @@ mod edit {
     const META_OFFSET_FIELD: u64 = 48;
     const RAW_SHA1_OFF: u64 = 64;
     const SHA1_OFF: u64 = 84;
-    const CHD_MDFLAGS_CHECKSUM: u8 = 0x01;
 
     struct Found {
         found: bool,
@@ -285,12 +326,6 @@ mod edit {
             return Err(Error::UnsupportedVersion);
         }
         Ok(())
-    }
-
-    fn sha1_20(data: &[u8]) -> [u8; 20] {
-        let mut h = Sha1::new();
-        h.update(data);
-        h.finalize().into()
     }
 
     /// Port of `metadata_find` (chd.cpp:2804): walk the linked list from `meta_offset`, returning
@@ -351,14 +386,15 @@ mod edit {
         Ok(())
     }
 
-    /// Port of `compute_overall_sha1` (chd.cpp:1709) reading the on-disk metadata list:
-    /// `SHA1(raw_sha1 ‖ sorted[tag(4 BE) ‖ SHA1(payload)])` over CHECKSUM-flagged entries.
+    /// Recompute the overall SHA-1 from the on-disk metadata linked list (port of
+    /// `compute_overall_sha1`, chd.cpp:1709). Reads only the CHECKSUM-flagged payloads off disk and
+    /// hands them to the shared [`super::overall_sha1`] for the sort + fold.
     fn overall_sha1<F: Read + Seek>(
         file: &mut F,
         raw_sha1: &[u8; 20],
         meta_offset: u64,
     ) -> Result<[u8; 20]> {
-        let mut hashes: Vec<[u8; 24]> = Vec::new();
+        let mut entries: Vec<(u32, u8, Vec<u8>)> = Vec::new();
         let mut offset = meta_offset;
         while offset != 0 {
             let mut hdr = [0u8; METADATA_HEADER_SIZE];
@@ -370,23 +406,17 @@ mod edit {
             let enext = u64::from_be_bytes([
                 hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
             ]);
-            if eflags & CHD_MDFLAGS_CHECKSUM != 0 {
+            if eflags & super::METADATA_FLAG_CHECKSUM != 0 {
                 let mut payload = vec![0u8; elen as usize];
                 file.read_exact(&mut payload)?; // positioned at offset + 16 after the header read
-                let mut h = [0u8; 24];
-                h[0..4].copy_from_slice(&etag.to_be_bytes());
-                h[4..24].copy_from_slice(&sha1_20(&payload));
-                hashes.push(h);
+                entries.push((etag, eflags, payload));
             }
             offset = enext;
         }
-        hashes.sort_unstable();
-        let mut hasher = Sha1::new();
-        hasher.update(raw_sha1);
-        for h in &hashes {
-            hasher.update(h);
-        }
-        Ok(hasher.finalize().into())
+        Ok(super::overall_sha1(
+            raw_sha1,
+            entries.iter().map(|(t, f, p)| (*t, *f, p.as_slice())),
+        ))
     }
 
     /// Port of `metadata_update_hash` (chd.cpp:2890): for a **compressed** V5 CHD, recompute the

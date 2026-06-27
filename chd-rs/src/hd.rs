@@ -209,6 +209,7 @@ pub fn create_raw_from_reader<R: Read, W: Write + Seek>(
         opts.unit_size,
         &codecs,
         &[],
+        None,
         progress,
         cancel,
     )
@@ -279,18 +280,7 @@ pub fn create_raw_from_path_with_parent(
     )?;
 
     let mut out = File::create(out_path).map_err(Error::from)?;
-    let mut prog = |done: u64, total: u64, c: u64| {
-        progress(CompressionProgress {
-            bytes_done: done,
-            bytes_total: total,
-            ratio: if done == 0 {
-                1.0
-            } else {
-                c as f64 / done as f64
-            },
-        });
-    };
-    let res = write::write_raw_inner(
+    let res = write::write_create(
         &mut out,
         &data,
         hunk_bytes,
@@ -298,7 +288,7 @@ pub fn create_raw_from_path_with_parent(
         &codecs,
         &[],
         Some(&pref),
-        &mut prog,
+        progress,
         cancel,
     );
     if res.is_err() {
@@ -355,6 +345,7 @@ pub fn create_from_reader<R: Read, W: Write + Seek>(
         opts.unit_size,
         &codecs,
         &entries,
+        None,
         progress,
         cancel,
     )
@@ -407,27 +398,14 @@ fn create_from_path_impl(
 /// (any codec/version chd-rs decodes); the output is the exact logical image.
 pub fn extract_to_writer<W: Write>(
     chd_path: &Path,
-    mut writer: W,
+    writer: W,
     progress: &mut dyn FnMut(u64),
 ) -> Result<()> {
     let f = BufReader::new(File::open(chd_path).map_err(Error::from)?);
     let chd = Chd::open(f, None)?;
     let logical = chd.header().logical_bytes();
     let hunk_size = chd.header().hunk_size() as usize;
-
-    let mut reader = ChdReader::new(chd);
-    let mut buf = vec![0u8; hunk_size.max(1)];
-    let mut remaining = logical;
-    let mut done = 0u64;
-    while remaining > 0 {
-        let want = remaining.min(hunk_size as u64) as usize;
-        reader.read_exact(&mut buf[..want]).map_err(Error::from)?;
-        writer.write_all(&buf[..want]).map_err(Error::from)?;
-        remaining -= want as u64;
-        done += want as u64;
-        progress(done);
-    }
-    Ok(())
+    write::drain(ChdReader::new(chd), logical, hunk_size, writer, progress)
 }
 
 /// File convenience over [`extract_to_writer`].

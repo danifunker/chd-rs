@@ -17,36 +17,6 @@ use num_traits::ToPrimitive;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::panic::AssertUnwindSafe;
 
-/// Read-side port of `chd_file::compute_overall_sha1` (`chd.cpp:1709`):
-/// `SHA1(raw_sha1 ‖ sorted[ tag(4 BE) ‖ SHA1(payload) ])` over the CHECKSUM-flagged metadata
-/// (sorted by the 24-byte `(tag, sha1)` tuple). Used by [`Chd::verify`].
-#[cfg(feature = "verify")]
-fn verify_overall_sha1(raw_sha1: &[u8; 20], metas: &[crate::metadata::Metadata]) -> [u8; 20] {
-    use sha1::{Digest, Sha1};
-    const CHD_MDFLAGS_CHECKSUM: u8 = 0x01;
-    let mut hashes: Vec<[u8; 24]> = Vec::new();
-    for m in metas {
-        if m.flags & CHD_MDFLAGS_CHECKSUM == 0 {
-            continue;
-        }
-        let mut h = [0u8; 24];
-        h[0..4].copy_from_slice(&m.metatag.to_be_bytes());
-        let mut sh = Sha1::new();
-        sh.update(&m.value);
-        let payload_sha1: [u8; 20] = sh.finalize().into();
-        h[4..24].copy_from_slice(&payload_sha1);
-        hashes.push(h);
-    }
-    hashes.sort_unstable();
-
-    let mut hasher = Sha1::new();
-    hasher.update(raw_sha1);
-    for h in &hashes {
-        hasher.update(h);
-    }
-    hasher.finalize().into()
-}
-
 /// A CHD (MAME Compressed Hunks of Data) file.
 pub struct Chd<F: Read + Seek> {
     file: F,
@@ -258,7 +228,12 @@ impl<F: Read + Seek> Chd<F> {
             remaining -= take as u64;
         }
         let computed_raw_sha1: [u8; 20] = hasher.finalize().into();
-        let computed_sha1 = verify_overall_sha1(&computed_raw_sha1, &metas);
+        let computed_sha1 = crate::metadata::overall_sha1(
+            &computed_raw_sha1,
+            metas
+                .iter()
+                .map(|m| (m.metatag, m.flags, m.value.as_slice())),
+        );
 
         Ok(crate::VerifyResult {
             computed_raw_sha1,

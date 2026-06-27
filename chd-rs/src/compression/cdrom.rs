@@ -257,6 +257,25 @@ impl<Engine: CodecImplementation, SubEngine: CodecImplementation> CodecImplement
     }
 }
 
+/// De-swizzle a hunk of interleaved CD frames (`[sector(2352) ‖ subcode(96)] × frames`) into a
+/// sector run (`frames × 2352`) followed by a subcode run (`frames × 96`) at the start of `buffer` —
+/// the encode inverse of the decoder's re-swizzle. Shared by the CD wrapper encoders
+/// (`cdlz`/`cdzl`/`cdzs` via [`CdEncoder`], and `cdfl`).
+#[cfg(feature = "write")]
+pub(crate) fn deswizzle_cd_frames(input: &[u8], buffer: &mut [u8], frames: usize) {
+    let (sect, sub, frame) = (
+        CD_MAX_SECTOR_DATA as usize,
+        CD_MAX_SUBCODE_DATA as usize,
+        CD_FRAME_SIZE as usize,
+    );
+    let sect_total = frames * sect;
+    for f in 0..frames {
+        let src = &input[f * frame..];
+        buffer[f * sect..][..sect].copy_from_slice(&src[..sect]);
+        buffer[sect_total + f * sub..][..sub].copy_from_slice(&src[sect..][..sub]);
+    }
+}
+
 /// CD-ROM wrapper **compression** codec — the encode mirror of [`CdCodec`]. Generic over the
 /// sector engine `Engine` and subcode engine `SubEngine` (both [`CodecEncodeImplementation`]).
 ///
@@ -302,17 +321,7 @@ where
         let sect_total = frames * CD_MAX_SECTOR_DATA as usize;
         let sub_total = frames * CD_MAX_SUBCODE_DATA as usize;
 
-        // de-swizzle [sector ‖ subcode] frames into the sector run then the subcode run
-        for f in 0..frames {
-            let src = &input[f * CD_FRAME_SIZE as usize..];
-            self.buffer[f * CD_MAX_SECTOR_DATA as usize..][..CD_MAX_SECTOR_DATA as usize]
-                .copy_from_slice(&src[..CD_MAX_SECTOR_DATA as usize]);
-            self.buffer[sect_total + f * CD_MAX_SUBCODE_DATA as usize..]
-                [..CD_MAX_SUBCODE_DATA as usize]
-                .copy_from_slice(
-                    &src[CD_MAX_SECTOR_DATA as usize..][..CD_MAX_SUBCODE_DATA as usize],
-                );
-        }
+        deswizzle_cd_frames(input, &mut self.buffer, frames);
 
         // strip the sync header + ECC of verifiable data sectors, recording which in the bitmap
         let mut ecc_flags = vec![0u8; ecc_bytes];

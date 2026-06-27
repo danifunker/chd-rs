@@ -483,17 +483,8 @@ impl crate::compression::CodecEncodeImplementation for CdFlacEncoder {
         let sect_total = frames * CD_MAX_SECTOR_DATA as usize;
         let sub_total = frames * CD_MAX_SUBCODE_DATA as usize;
 
-        // de-swizzle [sector ‖ subcode] frames into the sector run then the subcode run (no ECC strip)
-        for f in 0..frames {
-            let src = &input[f * CD_FRAME_SIZE as usize..];
-            self.buffer[f * CD_MAX_SECTOR_DATA as usize..][..CD_MAX_SECTOR_DATA as usize]
-                .copy_from_slice(&src[..CD_MAX_SECTOR_DATA as usize]);
-            self.buffer[sect_total + f * CD_MAX_SUBCODE_DATA as usize..]
-                [..CD_MAX_SUBCODE_DATA as usize]
-                .copy_from_slice(
-                    &src[CD_MAX_SECTOR_DATA as usize..][..CD_MAX_SUBCODE_DATA as usize],
-                );
-        }
+        // de-swizzle into the sector run + subcode run (no ECC strip, unlike the other CD codecs)
+        super::cdrom::deswizzle_cd_frames(input, &mut self.buffer, frames);
 
         // FLAC-encode the sector run as big-endian interleaved 16-bit stereo (no endian flag byte).
         let samples: Vec<i32> = self.buffer[..sect_total]
