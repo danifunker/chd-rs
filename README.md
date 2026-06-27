@@ -116,8 +116,7 @@ uncompressed CHD — in place, or as an uncompressed **diff** over a compressed 
 `Chd::verify()` (the `verify` feature, also enabled by `write`) recomputes the raw + overall
 (metadata-inclusive) SHA-1 and checks them against the header.
 
-See [docs/chdman-mapping.md](docs/chdman-mapping.md) for the full command mapping, and
-[docs/libchdman-parity.md](docs/libchdman-parity.md) for API-parity details.
+See [docs/chdman-mapping.md](docs/chdman-mapping.md) for the full command mapping.
 
 ### Supported Codecs
 chd-rs supports the following compression codecs, with wider coverage than libchdr. For implementation details,
@@ -205,8 +204,7 @@ The owned-handle runtime read/write surface maps to `hd::HdImage` (`open` / `ope
 `read_sector` / `write_sector`); `CompressionProgress` matches libchdman-rs field-for-field.
 
 For the exhaustive "translate my libchdman-rs code" guide (every accessor and diverging item) see
-[docs/libchdman-differences.md](docs/libchdman-differences.md); the full API map is in
-[docs/libchdman-parity.md](docs/libchdman-parity.md), and the chdman-command mapping in
+[docs/libchdman-differences.md](docs/libchdman-differences.md), and the chdman-command mapping in
 [docs/chdman-mapping.md](docs/chdman-mapping.md).
 
 ## `rchdman` command line tool

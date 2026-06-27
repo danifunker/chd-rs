@@ -74,13 +74,13 @@ bitreader = "0.3.6"
 ruzstd = "0.8.0"
 
 # Bit-exact pure-Rust codec encoders (write feature), each byte-exact with the C library
-# chdman 0.288 uses. Published on crates.io; see docs/codec-ports/. For co-developing one of
-# these alongside chd-rs, add an (uncommitted) `[patch.crates-io]` pointing at its working copy.
+# chdman 0.288 uses. Published on crates.io. For co-developing one of these alongside chd-rs, add
+# an (uncommitted) `[patch.crates-io]` pointing at its working copy.
 lzma-sdk-rs = { version = "0.2301", optional = true } # LZMA SDK 23.01
 zlib-bitexact-rs = { version = "0.131", optional = true } # stock zlib 1.3.1
 # Bit-exact pure-Rust libFLAC 1.4.3 encoder (raw `flac` + DVD-default codec). Float parity is
 # validated vs glibc libm; byte-identity to an MSVC/Windows chdman is not guaranteed (output is
-# always round-trip-correct). See docs/codec-ports/libflac-rs.md.
+# always round-trip-correct).
 libflac-rs = { version = "0.143", optional = true }
 sha1 = { version = "0.10", optional = true }
 # Pinned `=0.155`: the zstd-1.5.5-targeted line (chdman's version). A bare requirement would

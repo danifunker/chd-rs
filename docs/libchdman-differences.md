@@ -3,9 +3,8 @@
 chd-rs offers the same CHD **create/extract** functionality as
 [`libchdman-rs`](../../libchdman-rs) (a C++/MAME wrapper), but keeps chd-rs's own idioms on the
 read side. This doc is the authoritative "how do I translate my libchdman-rs code" guide: every
-intentional divergence, and the mechanical substitution for it. The full API map (which item maps
-to which) is in [libchdman-parity.md](libchdman-parity.md); this doc is the *why it differs / what
-to write instead*.
+intentional divergence, and the mechanical substitution for it — the *why it differs / what to
+write instead*.
 
 The headline decision (locked): **keep chd-rs's generic, borrowed reader; add the create/extract
 surface as free functions; do not graft libchdman-rs's owned, mutable `Chd` handle.**
@@ -280,7 +279,7 @@ none → `Error::UnsupportedFormat`). `Chd::info() -> ChdInfo` mirrors `chdman i
 | `make_tag(a,b,c,d)` (4-arg) | crate-internal `make_tag(&[u8;4])` |
 
 `HunkIter`/`MetadataIter`/`ChdReader`/`HunkReader` and the metadata tag constants exist under
-different names — see [libchdman-parity.md](libchdman-parity.md) §3.7. The only libchdman-rs input
+different names. The only libchdman-rs input
 not yet handled is **Nero `.nrg`** (a binary TOC with no fixture path to verify against).
 
 ---

@@ -1,8 +1,8 @@
 # chdman → chd-rs / rchdman command mapping
 
 How each `chdman` 0.288 sub-command maps onto chd-rs's library API and the `rchdman` CLI. Unless
-noted, the **created CHD is byte-for-byte identical to chdman** (the project's verification bar; see
-[libchdman-parity.md](libchdman-parity.md)). Library create/extract functions live in per-format
+noted, the **created CHD is byte-for-byte identical to chdman** (the project's verification bar).
+Library create/extract functions live in per-format
 modules and take `progress: &mut dyn FnMut(CompressionProgress)` + `cancel: &dyn Fn() -> bool`
 callbacks (extract takes `&mut dyn FnMut(u64)`); they need the `write` feature.
 
